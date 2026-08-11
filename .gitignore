@@ -1,5 +1,3 @@
-.github/workflows/ci.yaml
-.github/workflows/deploy.yaml
 # ==============================
 # Root .gitignore 
 # ==============================

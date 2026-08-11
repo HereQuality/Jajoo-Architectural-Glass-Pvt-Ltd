@@ -23,10 +23,18 @@ export const getProductionEntryById = async (id) =>
 export const listProductionEntries = async (params = {}) =>
     api.get(ENDPOINTS.PRODUCTION_ENTRIES.BASE, { params });
 
+/**
+ * Operator Efficiency + Machine Efficiency tables for a date range.
+ * @param {Object} params - { from, to }
+ */
+export const getProductionEfficiency = async (params = {}) =>
+    api.get(ENDPOINTS.PRODUCTION_ENTRIES.EFFICIENCY, { params });
+
 export default {
     createProductionEntry,
     updateProductionEntry,
     deleteProductionEntry,
     getProductionEntryById,
     listProductionEntries,
+    getProductionEfficiency,
 };

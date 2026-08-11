@@ -63,6 +63,7 @@ export const ENDPOINTS = {
     PRODUCTION_ENTRIES: {
         BASE: `${V1}/production-entries`,
         BY_ID: (id) => `${V1}/production-entries/${id}`,
+        EFFICIENCY: `${V1}/production-entries/efficiency`,
     },
 
     // Operator Master endpoints

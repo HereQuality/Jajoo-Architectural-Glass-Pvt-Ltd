@@ -4,6 +4,8 @@ import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
 import DeleteModal from "../Components/Common/DeleteModal";
+import Tooltip from "../Components/Common/Tooltip";
+import StatusCheckbox from "../Components/Common/StatusCheckbox";
 import { useInvalidateProcesses } from "../hooks/useProcesses";
 import {
   createProcess,
@@ -193,7 +195,7 @@ const ProcessMaster = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isDeleteLoading, setIsDeleteLoading] = useState(false);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("All");
+  const [activeOnly, setActiveOnly] = useState(true);
 
   // Modals
   const [showAddModal, setShowAddModal] = useState(false);
@@ -207,14 +209,14 @@ const ProcessMaster = () => {
       skip: 0,
       per_page: 200,
       match: query || undefined,
-      isActive: filter === "Active" ? true : filter === "Inactive" ? false : undefined,
+      isActive: activeOnly,
     })
       .then((res) => setProcesses(res.data?.data?.[0]?.data || []))
       .catch(() => toast.error?.("Failed to load processes"))
       .finally(() => setIsLoading(false));
   };
 
-  useEffect(() => { fetchProcesses(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [query, filter]);
+  useEffect(() => { fetchProcesses(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [query, activeOnly]);
 
   const openEdit = (id) => {
     getProcessById(id)
@@ -273,15 +275,7 @@ const ProcessMaster = () => {
           onChange={(e) => setQuery(e.target.value)}
           className="w-full sm:w-64 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
         />
-        <select
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          className="ml-auto w-full sm:w-40 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white text-slate-700"
-        >
-          <option value="All">All Status</option>
-          <option value="Active">Active Only</option>
-          <option value="Inactive">Inactive Only</option>
-        </select>
+        <StatusCheckbox checked={activeOnly} onChange={setActiveOnly} className="sm:ml-auto" />
       </div>
 
       {/* Table */}
@@ -306,7 +300,11 @@ const ProcessMaster = () => {
             {processes.map((p) => (
               <tr key={p._id} className="border-t border-slate-100 hover:bg-slate-50/50 transition-colors">
                 <td className="px-4 py-3 text-slate-800 font-medium">{p.processName}</td>
-                <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{p.description || "—"}</td>
+                <td className="px-4 py-3 text-slate-500 max-w-xs">
+                  <Tooltip text={p.description}>
+                    <span className="block truncate">{p.description || "—"}</span>
+                  </Tooltip>
+                </td>
                 <td className="px-4 py-3">
                   <span
                     className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${

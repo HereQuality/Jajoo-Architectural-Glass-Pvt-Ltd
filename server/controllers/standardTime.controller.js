@@ -179,7 +179,11 @@ exports.searchStandardTimes = async (req, res) => {
     const [totalCount, records] = await Promise.all([
       StandardTime.countDocuments(query),
       StandardTime.find(query)
-        .populate("machine", "machineName machineCode")
+        .populate({
+          path: "machine",
+          select: "machineName machineCode processes",
+          populate: { path: "processes", select: "processName" },
+        })
         .sort({ "machine.machineName": 1, sizeWidthMm: 1, sizeHeightMm: 1, thicknessMm: 1 })
         .skip(parseInt(skip))
         .limit(parseInt(per_page))

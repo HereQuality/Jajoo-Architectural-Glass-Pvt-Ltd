@@ -2,6 +2,7 @@ const ProductionEntry = require("../models/ProductionEntry");
 const Machine = require("../models/Machine");
 const { computeCalculations } = require("../services/productionCalculation.service");
 const { resolveMachineFilter } = require("../utils/entryQuery");
+const { aggregateEfficiencyByGroup } = require("../utils/efficiencyAggregate");
 
 const NUMERIC_FIELDS = [
   "sizeWidthMm", "sizeHeightMm", "thicknessMm",
@@ -106,6 +107,10 @@ function buildData(body) {
 // with what the client saw.
 function capacityError(data) {
   const ideal = data.calculated.idealProductionQty;
+  if (ideal === null) {
+    return `Not achievable: Available Working Time is NA — Planned Downtime + total Stoppage consumes the entire ` +
+      `Working Schedule Time, so there is no time left to grind any glass. Reduce downtime/stoppage minutes.`;
+  }
   if (ideal < data.processQty) {
     return `Not achievable: Available Working Time ÷ Standard Time = ${ideal.toFixed(2)} pcs, ` +
       `which is less than Process Qty (${data.processQty}). Reduce Process Qty or free up more Available Working Time.`;
@@ -184,6 +189,42 @@ exports.getProductionEntryById = async (req, res) => {
       .populate("machine", "machineName machineCode").populate("operator", "name");
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
     res.status(200).json({ isOk: true, data: entry });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ isOk: false, message: err.message });
+  }
+};
+
+// Operator Efficiency + Machine Efficiency tables, date-range filtered —
+// grouped/reduced from the same rows as the sheet, using the same
+// idealProductionQty (NA-aware) the sheet already computes and stores.
+exports.getProductionEfficiency = async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const query = {};
+    if (from || to) {
+      query.date = {};
+      if (from) query.date.$gte = new Date(from);
+      if (to) query.date.$lte = new Date(to);
+    }
+
+    const entries = await ProductionEntry.find(query)
+      .populate("machine", "machineName")
+      .populate("operator", "name")
+      .lean();
+
+    const operators = aggregateEfficiencyByGroup(
+      entries,
+      (e) => (e.operator?._id ? String(e.operator._id) : null),
+      (e) => e.operator?.name || "Unknown Operator",
+    );
+    const machines = aggregateEfficiencyByGroup(
+      entries,
+      (e) => (e.machine?._id ? String(e.machine._id) : null),
+      (e) => e.machine?.machineName || "Unknown Machine",
+    );
+
+    res.status(200).json({ isOk: true, data: { operators, machines } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ isOk: false, message: err.message });

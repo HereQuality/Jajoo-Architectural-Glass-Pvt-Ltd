@@ -23,6 +23,7 @@
     "dagre": "^0.8.5",
     "date-fns": "^4.4.0",
     "dayjs": "^1.11.21",
+    "exceljs": "^4.4.0",
     "lucide-react": "^1.27.0",
     "react": "^18.3.1",
     "react-data-table-component": "^8.5.0",
@@ -37,6 +38,7 @@
     "reactstrap": "^9.2.3",
     "recharts": "^3.10.1",
     "socket.io-client": "^4.7.5",
+    "xlsx": "^0.18.5",
     "zustand": "^4.5.4"
   },
   "devDependencies": {

@@ -11,6 +11,7 @@ import { AuthProvider } from "./context/AuthContext";
 import { SocketProvider } from "./context/SocketContext";
 import { AlertProvider } from "./context/AlertContext";
 import { ThemeProvider } from "./context/ThemeContext";
+import ErrorBoundary from "./Components/Common/ErrorBoundary";
 
 // Shared cache for reference data (roles, departments, ...) that rarely
 // changes. staleTime: 2 min means switching between pages that both need
@@ -28,19 +29,21 @@ const queryClient = new QueryClient({
 });
 
 ReactDOM.createRoot(document.getElementById("root")).render(
-  <QueryClientProvider client={queryClient}>
-      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-        <AlertProvider>
-          <AuthProvider>
-            <SocketProvider>
-            <MenuProvider>
-              <ThemeProvider>
-                <App />
-              </ThemeProvider>
-            </MenuProvider>
-            </SocketProvider>
-          </AuthProvider>
-        </AlertProvider>
-      </BrowserRouter>
-  </QueryClientProvider>
+  <ErrorBoundary>
+    <QueryClientProvider client={queryClient}>
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <AlertProvider>
+            <AuthProvider>
+              <SocketProvider>
+              <MenuProvider>
+                <ThemeProvider>
+                  <App />
+                </ThemeProvider>
+              </MenuProvider>
+              </SocketProvider>
+            </AuthProvider>
+          </AlertProvider>
+        </BrowserRouter>
+    </QueryClientProvider>
+  </ErrorBoundary>
 );

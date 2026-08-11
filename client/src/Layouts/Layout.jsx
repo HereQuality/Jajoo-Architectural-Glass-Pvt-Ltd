@@ -171,7 +171,8 @@ export default function Layout({ children }) {
       <aside
         style={{
           background: isDarkMode ? '#0f0f0f' : '#ffffff',
-          borderRight: isDarkMode ? '1px solid #272727' : '1px solid #cbd5e1',
+          borderRight: isDarkMode ? '1px solid #272727' : '1px solid #e2e8f0',
+          boxShadow: isDarkMode ? 'none' : '1px 0 6px rgba(15, 23, 42, 0.08)',
           color: isDarkMode ? '#f1f1f1' : '#1e293b',
         }}
         className={`fixed inset-y-0 left-0 flex flex-col z-50 transform transition-all duration-300 ease-in-out md:relative md:translate-x-0 ${mobileMenuOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'} ${sidebarCollapsed ? 'md:w-[72px] w-64' : 'w-64'}`}
@@ -179,7 +180,7 @@ export default function Layout({ children }) {
         {/* Logo header */}
         <div
           style={{
-            borderBottom: isDarkMode ? '1px solid #272727' : '1px solid #cbd5e1',
+            borderBottom: isDarkMode ? '1px solid #272727' : '1px solid #e2e8f0',
             background: isDarkMode ? '#0f0f0f' : '#ffffff',
           }}
           className={`h-16 flex items-center ${sidebarCollapsed ? 'md:justify-center md:px-2 px-6 justify-between' : 'px-6 justify-between'}`}
@@ -208,7 +209,7 @@ export default function Layout({ children }) {
           title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           style={{
             background: isDarkMode ? '#374151' : '#2563eb',
-            border: isDarkMode ? '1px solid #4b5563' : '1px solid #1d4ed8',
+            border: isDarkMode ? '1px solid #4b5563' : '1px solid #93c5fd',
             color: '#ffffff',
           }}
           className="hidden md:flex absolute -right-3 top-[52px] h-6 w-6 rounded-full shadow-md items-center justify-center hover:scale-110 transition-all z-10"
@@ -227,8 +228,12 @@ export default function Layout({ children }) {
               />
             </div>
           ) : (
-            menus && menus.map((group) => (
-              <div key={group.groupId} className={`mb-2 ${sidebarCollapsed ? 'relative group/hovergroup' : ''}`}>
+            menus && menus.map((group, groupIdx) => (
+              <div
+                key={group.groupId}
+                style={groupIdx > 0 ? { borderTop: isDarkMode ? '1px solid #272727' : '1px solid #e2e8f0' } : undefined}
+                className={`mb-2 ${groupIdx > 0 ? 'pt-2' : ''} ${sidebarCollapsed ? 'relative group/hovergroup' : ''}`}
+              >
                 {group.isLink ? (
                   <NavLink
                     to={toRolePath(group.url, roleSlug)}
@@ -417,7 +422,7 @@ export default function Layout({ children }) {
         <header
           style={{
             background: isDarkMode ? '#0f0f0f' : '#ffffff',
-            borderBottom: isDarkMode ? '1px solid #272727' : '1px solid #cbd5e1',
+            borderBottom: isDarkMode ? '1px solid #272727' : '1px solid #e2e8f0',
           }}
           className="h-16 flex items-center justify-between px-4 lg:px-8 z-40 shrink-0 relative"
         >

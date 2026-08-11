@@ -1,34 +1,68 @@
-import React from "react";
+import React, { lazy } from "react";
 import { Navigate } from "react-router-dom";
-import Landing from "../pages/Landing";
-import Login from "../pages/Login";
-import Blocked from "../pages/Authentication/Blocked";
-import NoAccess from "../pages/Authentication/NoAccess";
 import NotFoundFallback from "./NotFoundFallback";
 
-import HqeplAdmin from "../pages/HqeplAdmin";
-import Home from "../pages/Home";
-import Profile from "../pages/Profile";
-import MenuGroup from "../pages/MenuGroup";
-import MenuMaster from "../pages/MenuMaster";
-import Department from "../pages/Department";
-import RoleMaster from "../pages/RoleMaster";
-import Employee from "../pages/Employee";
-import ManageRole from "../pages/ManageRole";
-import CompanyManagement from "../pages/CompanyManagement";
-import Settings from "../pages/Settings";
-import Shortcuts from "../pages/Shortcuts";
-import TeamMembers from "../pages/TeamMembers";
-import Skills from "../pages/Skills";
-import TeamsBoard from "../pages/TeamsBoard";
-import Support from "../pages/Support";
-import Notifications from "../pages/Notifications";
-import MachineMaster from "../pages/MachineMaster";
-import ProcessMaster from "../pages/ProcessMaster";
-import OperatorMaster from "../pages/OperatorMaster";
-import StandardTimeMaster from "../pages/StandardTimeMaster";
-import ProductionEntry from "../pages/ProductionEntry";
-import Dashboard from "../pages/Dashboard";
+// Every page is a separate lazy chunk — none of these download until the
+// user actually navigates to that route, instead of one multi-MB bundle
+// upfront. Routes/index.jsx wraps the whole tree in a single <Suspense>.
+//
+// A lazy chunk's import() 404s if the browser has an old tab open (or a
+// stale cached index.html) from BEFORE a new deploy — the old page still
+// references the previous build's chunk filenames/hashes, which no longer
+// exist once a new build has been shipped. Left unhandled, that rejected
+// promise crashes the whole app to a blank screen (no ErrorBoundary can
+// make that graceful, since the real fix is just "get the current
+// index.html"). lazyWithRetry does that automatically: on an import
+// failure it does ONE full page reload (which re-fetches index.html and
+// therefore the current chunk manifest) instead of leaving the user
+// stuck looking at nothing. The sessionStorage flag caps it at one retry
+// per session so a genuinely broken chunk doesn't reload-loop forever.
+function lazyWithRetry(importer) {
+  return lazy(async () => {
+    try {
+      const mod = await importer();
+      sessionStorage.removeItem("chunk-reload-attempted");
+      return mod;
+    } catch (err) {
+      if (!sessionStorage.getItem("chunk-reload-attempted")) {
+        sessionStorage.setItem("chunk-reload-attempted", "1");
+        window.location.reload();
+        // Never resolve — the reload is about to replace this page anyway.
+        return new Promise(() => {});
+      }
+      throw err;
+    }
+  });
+}
+
+const Landing = lazyWithRetry(() => import("../pages/Landing"));
+const Login = lazyWithRetry(() => import("../pages/Login"));
+const Blocked = lazyWithRetry(() => import("../pages/Authentication/Blocked"));
+const NoAccess = lazyWithRetry(() => import("../pages/Authentication/NoAccess"));
+
+const HqeplAdmin = lazyWithRetry(() => import("../pages/HqeplAdmin"));
+const Home = lazyWithRetry(() => import("../pages/Home"));
+const Profile = lazyWithRetry(() => import("../pages/Profile"));
+const MenuGroup = lazyWithRetry(() => import("../pages/MenuGroup"));
+const MenuMaster = lazyWithRetry(() => import("../pages/MenuMaster"));
+const Department = lazyWithRetry(() => import("../pages/Department"));
+const RoleMaster = lazyWithRetry(() => import("../pages/RoleMaster"));
+const Employee = lazyWithRetry(() => import("../pages/Employee"));
+const ManageRole = lazyWithRetry(() => import("../pages/ManageRole"));
+const CompanyManagement = lazyWithRetry(() => import("../pages/CompanyManagement"));
+const Settings = lazyWithRetry(() => import("../pages/Settings"));
+const Shortcuts = lazyWithRetry(() => import("../pages/Shortcuts"));
+const TeamMembers = lazyWithRetry(() => import("../pages/TeamMembers"));
+const Skills = lazyWithRetry(() => import("../pages/Skills"));
+const TeamsBoard = lazyWithRetry(() => import("../pages/TeamsBoard"));
+const Support = lazyWithRetry(() => import("../pages/Support"));
+const Notifications = lazyWithRetry(() => import("../pages/Notifications"));
+const MachineMaster = lazyWithRetry(() => import("../pages/MachineMaster"));
+const ProcessMaster = lazyWithRetry(() => import("../pages/ProcessMaster"));
+const OperatorMaster = lazyWithRetry(() => import("../pages/OperatorMaster"));
+const StandardTimeMaster = lazyWithRetry(() => import("../pages/StandardTimeMaster"));
+const GrindingEntry = lazyWithRetry(() => import("../pages/GrindingEntry"));
+const Dashboard = lazyWithRetry(() => import("../pages/Dashboard"));
 
 // ── Every logged-in page, defined ONCE ──────────────────────────────────
 // Every route renders under "/:roleSlug/<path>" — the role slug is
@@ -83,7 +117,7 @@ const protectedRoutes = [
   { path: "/production/processes", component: <ProcessMaster /> },
   { path: "/production/operators", component: <OperatorMaster /> },
   { path: "/production/standard-time", component: <StandardTimeMaster /> },
-  { path: "/production/data-entry", component: <ProductionEntry /> },
+  { path: "/production/data-entry", component: <GrindingEntry /> },
   { path: "/dashboard", component: <Dashboard /> },
 
   // Dev-only tool — not registered in Menu Master, reached by direct URL.

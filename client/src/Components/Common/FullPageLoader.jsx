@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useContext } from "react";
 import { useCompany } from "../../hooks/useCompany";
 import defaultLogo from "../../assets/logo.png";
+import { ThemeContext } from "../../context/ThemeContext";
 
 /**
  * Components/Common/FullPageLoader.jsx
@@ -24,6 +25,11 @@ import defaultLogo from "../../assets/logo.png";
 export default function FullPageLoader({ label = "Loading..." }) {
   const { data: companyDetails } = useCompany();
   const logoSrc = companyDetails?.logo;
+  // ThemeProvider reads adminData asynchronously and may not be mounted yet
+  // on the very first paint (this loader can render before auth resolves),
+  // so fall back to the persisted preference instead of assuming light mode.
+  const themeCtx = useContext(ThemeContext);
+  const isDarkMode = themeCtx?.isDarkMode ?? (localStorage.getItem("theme") === "dark");
 
   return (
     <div
@@ -31,7 +37,9 @@ export default function FullPageLoader({ label = "Loading..." }) {
       style={{
         minHeight: "100vh",
         width: "100%",
-        background: "linear-gradient(160deg, #f4f6ff 0%, #fbfbff 60%, #f6f4ff 100%)",
+        background: isDarkMode
+          ? "linear-gradient(160deg, #0f0f0f 0%, #131313 60%, #0f0f0f 100%)"
+          : "linear-gradient(160deg, #f4f6ff 0%, #fbfbff 60%, #f6f4ff 100%)",
       }}
     >
       <style>{`
@@ -56,7 +64,9 @@ export default function FullPageLoader({ label = "Loading..." }) {
         .fpl-bar {
           height: 10px;
           border-radius: 5px;
-          background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 37%, #e5e7eb 63%);
+          background: ${isDarkMode
+            ? "linear-gradient(90deg, #27272a 25%, #3f3f46 37%, #27272a 63%)"
+            : "linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 37%, #e5e7eb 63%)"};
           background-size: 400px 100%;
           animation: fpl-shimmer 1.4s ease-in-out infinite;
         }
@@ -75,7 +85,7 @@ export default function FullPageLoader({ label = "Loading..." }) {
         <div className="fpl-bar" style={{ width: "65%" }} />
       </div>
 
-      <span className="text-muted" style={{ fontSize: "0.8rem" }}>{label}</span>
+      <span style={{ fontSize: "0.8rem", color: isDarkMode ? "#94a3b8" : "#6b7280" }}>{label}</span>
     </div>
   );
 }

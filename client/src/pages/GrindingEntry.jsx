@@ -1,20 +1,24 @@
 import React, { useState, useEffect, useMemo } from "react";
 import ReactDOM from "react-dom";
-import { Plus, X, Factory, Eye, Pencil, Trash2 } from "lucide-react";
+import ExcelJS from "exceljs";
+import { Plus, X, Factory, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
 import { useMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import { useOperators } from "../hooks/useOperators";
+import { useDebounce } from "../hooks/useDebounce";
 import { listStandardTimes } from "../api/standardTime.api";
-import { createProductionEntry, listProductionEntries, updateProductionEntry, deleteProductionEntry } from "../api/productionEntries.api";
+import { createProductionEntry, listProductionEntries, updateProductionEntry, deleteProductionEntry, getProductionEfficiency } from "../api/productionEntries.api";
 import DatePicker from "../Components/Common/DatePicker";
 import TimePicker from "../Components/Common/TimePicker";
 import DeleteModal from "../Components/Common/DeleteModal";
 import { isEntryEditable, parseLocalDate } from "../utils/workingDays";
 
 // ── Stoppage fields ───────────────────────────────────────────────────────
+const PAGE_SIZE = 20;
+
 const STOPPAGE_FIELDS = [
   { key: "plannedDowntimeMin",         label: "Planned Downtime (Minutes)" },
   { key: "noManpowerMin",              label: "No Manpower (Minutes)" },
@@ -36,7 +40,7 @@ const CALC_COLUMNS = [
     key: "workingScheduleMin",
     label: "Working Schedule Time",
     unit: "min",
-    formula: "Working Schedule Time = (M/C Off Time − M/C Start Time) − Planned Downtime + Overtime",
+    formula: "Working Schedule Time = (M/C Off Time − M/C Start Time) + Overtime",
   },
   {
     key: "totalStoppageMin",
@@ -49,13 +53,13 @@ const CALC_COLUMNS = [
     key: "availableWorkingMin",
     label: "Available Working Time",
     unit: "min",
-    formula: "Available Working Time = Working Schedule Time − Total Stoppage",
+    formula: "Available Working Time = Working Schedule Time − Total Stoppage (NA if Total Stoppage ≥ Working Schedule Time)",
   },
   {
     key: "idealProductionQty",
     label: "Ideal Production",
-    unit: "pcs",
-    formula: "Ideal Production = Available Working Time ÷ Standard Time per Glass",
+    unit: "qty",
+    formula: "Ideal Production = Available Working Time ÷ Standard Time per Glass (NA if Available Working Time is NA)",
   },
   {
     key: "effectiveMcRunTimeMin",
@@ -67,19 +71,19 @@ const CALC_COLUMNS = [
     key: "unreportedTimeMin",
     label: "Unreported Time",
     unit: "min",
-    formula: "Unreported Time = Available Working Time − Effective M/C Run Time",
+    formula: "Unreported Time = Available Working Time − Effective M/C Run Time (NA if Available Working Time is NA)",
   },
   {
     key: "availabilityRatio",
     label: "Availability Ratio",
     unit: "",
-    formula: "Availability Ratio = Available Working Time ÷ Working Schedule Time",
+    formula: "Availability Ratio = Available Working Time ÷ Working Schedule Time (NA if Available Working Time is NA)",
   },
   {
     key: "performanceRatio",
     label: "Performance Ratio",
     unit: "",
-    formula: "Performance Ratio = Process Qty (Total Qty) ÷ Ideal Production",
+    formula: "Performance Ratio = Process Qty (Total Qty) ÷ Ideal Production (NA if Ideal Production is NA)",
   },
   {
     key: "qualityRatio",
@@ -89,7 +93,7 @@ const CALC_COLUMNS = [
   },
 ];
 
-const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100";
+const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if Available Working Time is NA)";
 
 const buildInit = (machineId = "") => ({
   date: new Date().toISOString().split("T")[0],
@@ -117,13 +121,18 @@ const timeToMinutes = (hhmm) => {
   return h * 60 + m;
 };
 
+// Returns null (NA) when total stoppage consumes the whole working schedule
+// — mirrors server/services/productionCalculation.service.js exactly,
+// including subtracting Planned Downtime exactly ONCE (it's already inside
+// totalStoppageMin as STOPPAGE_FIELDS[0], not subtracted again separately).
 const computeIdealProductionQty = (v) => {
   const num = (x) => Number(x) || 0;
   let shiftDurationMin = timeToMinutes(v.mcOffTime) - timeToMinutes(v.mcStartTime);
   if (shiftDurationMin <= 0) shiftDurationMin += 24 * 60;
   const totalStoppageMin = STOPPAGE_FIELDS.reduce((s, f) => s + num(v[f.key]), 0);
-  const workingScheduleMin = Math.max(shiftDurationMin - num(v.plannedDowntimeMin) + num(v.overtimeMin), 0);
-  const availableWorkingMin = Math.max(workingScheduleMin - totalStoppageMin, 0);
+  const workingScheduleMin = Math.max(shiftDurationMin + num(v.overtimeMin), 0);
+  if (totalStoppageMin >= workingScheduleMin) return null;
+  const availableWorkingMin = workingScheduleMin - totalStoppageMin;
   const std = num(v.standardTimePerPieceMin);
   return std > 0 ? availableWorkingMin / std : 0;
 };
@@ -179,7 +188,11 @@ const validate = (v) => {
   const stoppageFieldsClean = STOPPAGE_FIELDS.every((f) => !e[f.key]);
   if (!e.mcStartTime && !e.mcOffTime && !e.standardTimePerPieceMin && !e.processQty && stoppageFieldsClean) {
     const idealProductionQty = computeIdealProductionQty(v);
-    if (idealProductionQty < pq) {
+    if (idealProductionQty === null) {
+      e.processQty =
+        `Not achievable: Available Working Time is NA — Planned Downtime + total Stoppage consumes the entire ` +
+        `Working Schedule Time, so there is no time left to grind any glass. Reduce downtime/stoppage minutes.`;
+    } else if (idealProductionQty < pq) {
       e.processQty =
         `Not achievable: Available Working Time ÷ Standard Time = ${idealProductionQty.toFixed(2)} pcs, ` +
         `which is less than Process Qty (${pq}). Reduce Process Qty or free up more Available Working Time.`;
@@ -251,8 +264,224 @@ const FormulaPopover = ({ info, onClose }) => {
   );
 };
 
+// ── Efficiency popup: Operator Efficiency + Machine Efficiency tables,
+// date-range filtered. Ratios come back NA (null) from the server whenever
+// their denominator is zero (no entries in range, or every entry in the
+// group had an NA Available Working Time) — rendered as "NA", matching the
+// spreadsheet report this mirrors instead of a misleading 0.00%. ─────────
+const fmtPct = (n) => (n == null || isNaN(n) ? "NA" : `${Number(n).toFixed(2)}%`);
+const fmtQty = (n) => (n == null || isNaN(n) ? "NA" : Number(n).toLocaleString());
+
+// Machine tab gets 4 extra ratio columns (Availability, Performance, Quality, OEE%);
+// Operator tab only has Performance + Quality — efficiencyAggregate.js always returns
+// all fields, so this list just controls what each tab renders.
+const OPERATOR_COLUMNS = [
+  { key: "processQty", label: "Actual Total Qty Produced", fmt: fmtQty, align: "" },
+  { key: "okQty", label: "Total OK Qty", fmt: fmtQty, align: "" },
+  { key: "performanceRatio", label: "Performance Ratio", fmt: fmtPct, align: "font-medium text-brand-700 dark:text-brand-300" },
+  { key: "qualityRatio", label: "Quality Ratio", fmt: fmtPct, align: "font-medium text-brand-700 dark:text-brand-300" },
+];
+const MACHINE_COLUMNS = [
+  { key: "processQty", label: "Process Qty", fmt: fmtQty, align: "" },
+  { key: "okQty", label: "OK Qty", fmt: fmtQty, align: "" },
+  { key: "oeePercent", label: "OEE %", fmt: fmtPct, align: "font-bold text-brand-800 dark:text-brand-200" },
+  { key: "availabilityRatio", label: "Availability", fmt: fmtPct, align: "font-medium text-brand-700 dark:text-brand-300" },
+  { key: "performanceRatio", label: "Performance", fmt: fmtPct, align: "font-medium text-brand-700 dark:text-brand-300" },
+  { key: "qualityRatio", label: "Quality", fmt: fmtPct, align: "font-medium text-brand-700 dark:text-brand-300" },
+];
+
+const EfficiencyTable = ({ nameLabel, columns, rows, loading }) => (
+  <div className="bg-white dark:bg-[#1a1a1a] rounded-2xl border border-slate-300 dark:border-slate-700 shadow-sm overflow-hidden flex-1 flex flex-col min-h-0">
+    <div className="overflow-auto flex-1 min-h-0">
+      <table className="w-full text-xs sm:text-sm border-separate border-spacing-0">
+        <thead>
+          <tr className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-left">
+            <th className="sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">{nameLabel}</th>
+            {columns.map((c, ci) => (
+              <th key={c.key} className={`sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-b border-slate-300 dark:border-slate-700 ${ci < columns.length - 1 ? "border-r" : ""}`}>{c.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {loading && (
+            <tr><td colSpan={columns.length + 1} className="px-4 py-8 text-center text-slate-500 font-medium">Loading…</td></tr>
+          )}
+          {!loading && rows.length === 0 && (
+            <tr><td colSpan={columns.length + 1} className="px-4 py-8 text-center text-slate-500 font-medium">No entries match this filter.</td></tr>
+          )}
+          {!loading && rows.map((r, i) => (
+            <tr key={r.name} className={`border-b border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors ${i % 2 === 1 ? "bg-slate-50/70 dark:bg-slate-800/20" : "bg-white dark:bg-transparent"}`}>
+              <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-medium">{r.name}</td>
+              {columns.map((c, ci) => (
+                <td key={c.key} className={`px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200 ${ci < columns.length - 1 ? "border-r border-slate-300 dark:border-slate-700" : ""} ${c.align}`}>{c.fmt(r[c.key])}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+);
+
+const startOfMonth = () => {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split("T")[0];
+};
+const today = () => new Date().toISOString().split("T")[0];
+
+// Builds a real .xlsx workbook (not just a CSV) from the currently-visible
+// tab's rows/columns and triggers a download — every cell is formatted
+// exactly as it's shown on screen (e.g. "72.66%" / "NA"), so the file
+// matches what the user is looking at. Uses ExcelJS (not the `xlsx` package)
+// specifically because it can write real cell borders — SheetJS Community
+// Edition silently drops all styling (borders/fills) on write, so grid lines
+// only show up in ExcelJS output.
+const THIN_BORDER = { style: "thin", color: { argb: "FF64748B" } }; // slate-500, dark enough to read as a real grid line
+const CELL_BORDER = { top: THIN_BORDER, left: THIN_BORDER, bottom: THIN_BORDER, right: THIN_BORDER };
+
+const downloadExcel = async (filename, nameLabel, columns, rows) => {
+  const headers = [nameLabel, ...columns.map((c) => c.label)];
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet(`${nameLabel} Efficiency`.slice(0, 31));
+
+  const headerRow = ws.addRow(headers);
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FF1E293B" } }; // slate-800
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } }; // slate-100
+    cell.border = CELL_BORDER;
+    cell.alignment = { vertical: "middle" };
+  });
+
+  for (const r of rows) {
+    const row = ws.addRow([r.name, ...columns.map((c) => (r[c.key] == null ? "NA" : c.fmt(r[c.key])))]);
+    row.eachCell((cell) => { cell.border = CELL_BORDER; });
+  }
+
+  ws.columns = headers.map((h) => ({ width: Math.max(h.length + 2, 14) }));
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const EfficiencyModal = ({ onClose }) => {
+  const toast = useAlert() || toastify;
+  const [from, setFrom] = useState(startOfMonth());
+  const [to, setTo] = useState(today());
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState({ operators: [], machines: [] });
+  const [tab, setTab] = useState("machines"); // "machines" | "operators"
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebounce(search, 300);
+
+  const load = () => {
+    setLoading(true);
+    getProductionEfficiency({ from, to })
+      .then((res) => setData(res.data?.data || { operators: [], machines: [] }))
+      .catch(() => toast.error?.("Failed to load efficiency report"))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const activeRows = tab === "machines" ? data.machines : data.operators;
+  const activeColumns = tab === "machines" ? MACHINE_COLUMNS : OPERATOR_COLUMNS;
+  const nameLabel = tab === "machines" ? "Machine" : "Operator";
+
+  const filteredRows = useMemo(() => {
+    const q = debouncedSearch.trim().toLowerCase();
+    if (!q) return activeRows;
+    return activeRows.filter((r) => r.name.toLowerCase().includes(q));
+  }, [activeRows, debouncedSearch]);
+
+  const handleDownload = () => {
+    downloadExcel(`${tab === "machines" ? "machine" : "operator"}-efficiency_${from}_to_${to}.xlsx`, nameLabel, activeColumns, filteredRows);
+  };
+
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative flex flex-col w-full max-w-5xl h-[88vh] max-h-[88vh] bg-white dark:bg-[#1a1a1a] rounded-2xl shadow-xl border border-slate-300 dark:border-slate-700">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-700 shrink-0 rounded-t-2xl">
+          <div className="flex items-center gap-2">
+            <Gauge className="w-5 h-5 text-brand-600" />
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">Grinding Efficiency Report</h2>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500"><X className="w-5 h-5" /></button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex items-center gap-1 px-6 pt-3 border-b border-slate-100 dark:border-slate-700 shrink-0">
+          {[
+            { key: "machines", label: "Machine Efficiency" },
+            { key: "operators", label: "Operator Efficiency" },
+          ].map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
+                tab === t.key
+                  ? "border-brand-600 text-brand-700 dark:text-brand-300"
+                  : "border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-200"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1 flex flex-col min-h-0">
+          <div className="flex flex-wrap items-end gap-3 shrink-0">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Start Date</label>
+              <DatePicker name="from" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="Start date" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">End Date</label>
+              <DatePicker name="to" value={to} onChange={(e) => setTo(e.target.value)} placeholder="End date" />
+            </div>
+            <button
+              onClick={load}
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors disabled:opacity-60"
+            >
+              {loading ? "Loading…" : "Apply Filter"}
+            </button>
+            <div className="flex-1 min-w-[160px]">
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Search {nameLabel}</label>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={`Search by ${nameLabel.toLowerCase()} name…`}
+                className="w-full border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white dark:bg-[#1a1a1a]"
+              />
+            </div>
+            <button
+              onClick={handleDownload}
+              disabled={loading || filteredRows.length === 0}
+              title="Download this table as an Excel file"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors disabled:opacity-50"
+            >
+              <Download className="w-4 h-4" /> Download Excel
+            </button>
+          </div>
+
+          <EfficiencyTable nameLabel={nameLabel} columns={activeColumns} rows={filteredRows} loading={loading} />
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+};
+
 // ── Main Page ─────────────────────────────────────────────────────────────
-const ProductionEntry = () => {
+const GrindingEntry = () => {
   const toast = useAlert() || toastify;
   const { currentPagePermissions = { read: true, write: true, edit: true, delete: true } } = React.useContext(MenuContext) || {};
   const { data: machines = [] } = useMachines();
@@ -260,6 +489,12 @@ const ProductionEntry = () => {
   const { data: operators = [] } = useOperators();
 
   const [activeMachine, setActiveMachine] = useState("");
+  const [sheetSearch, setSheetSearch] = useState("");
+  const debouncedSheetSearch = useDebounce(sheetSearch, 300);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
   const [entries, setEntries] = useState([]);
   const [loadingSheet, setLoadingSheet] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -269,6 +504,7 @@ const ProductionEntry = () => {
   const [saving, setSaving] = useState(false);
   const [openFormula, setOpenFormula] = useState(null); // { key, label, formula, rect } | null
   const [openRemark, setOpenRemark] = useState(null); // { id, text, rect } | null
+  const [showEfficiency, setShowEfficiency] = useState(false);
 
   const [editId, setEditId] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
@@ -373,15 +609,75 @@ const ProductionEntry = () => {
 
   // (Auto-select removed to default to "All Machines")
 
-  // Fetch production sheet
+  // Fetch production sheet — 20 rows per page by default so the whole
+  // history doesn't load at once. While actively searching, pulls a wider
+  // batch instead (search is a client-side filter over whatever's loaded,
+  // so a plain 20-row page would make search look like it's missing
+  // matches that are just on a different page).
+  const isSearching = !!debouncedSheetSearch.trim();
   const fetchSheet = () => {
     setLoadingSheet(true);
-    listProductionEntries(activeMachine ? { machine: activeMachine, per_page: 100 } : { per_page: 100 })
-      .then((res) => setEntries(res.data?.data || []))
+    const params = isSearching
+      ? { per_page: 1000, skip: 0 }
+      : { per_page: PAGE_SIZE, skip: (page - 1) * PAGE_SIZE };
+    if (activeMachine) params.machine = activeMachine;
+    if (dateFrom) params.from = dateFrom;
+    if (dateTo) params.to = dateTo;
+    listProductionEntries(params)
+      .then((res) => {
+        setEntries(res.data?.data || []);
+        setTotalCount(res.data?.count || 0);
+      })
       .catch(() => toast.error?.("Failed to load sheet"))
       .finally(() => setLoadingSheet(false));
   };
-  useEffect(() => { fetchSheet(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [activeMachine]);
+  useEffect(() => { fetchSheet(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [activeMachine, dateFrom, dateTo, page, debouncedSheetSearch]);
+
+  // Any filter change (machine/date/search) should reset back to page 1 —
+  // otherwise a narrower filter could land on a now out-of-range page.
+  useEffect(() => { setPage(1); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [activeMachine, dateFrom, dateTo, debouncedSheetSearch]);
+
+  // Free-text search across the sheet — matches against every column shown
+  // in the table (entered fields AND calculated ones, formatted the same
+  // way they're rendered, e.g. "NA" or "55.66"), not just Machine/Operator.
+  const filteredEntries = useMemo(() => {
+    const q = debouncedSheetSearch.trim().toLowerCase();
+    if (!q) return entries;
+    const fmtNum = (n) => (n == null || isNaN(n) ? "NA" : Number(n).toFixed(2));
+    return entries.filter((e) => {
+      const mName = typeof e.machine === "object" ? e.machine?.machineName : machines.find((m) => m._id === e.machine)?.machineName;
+      const c = e.calculated || {};
+      const haystack = [
+        e.date ? new Date(e.date).toLocaleDateString() : "",
+        mName,
+        e.operator?.name,
+        e.mcStartTime,
+        e.mcOffTime,
+        e.sizeWidthMm != null && e.sizeHeightMm != null ? `${e.sizeWidthMm}x${e.sizeHeightMm}` : "",
+        e.thicknessMm,
+        e.standardTimePerPieceMin,
+        e.processQty,
+        e.okQty,
+        Number(e.processQty) - Number(e.okQty), // Rejected Qty
+        c.workingScheduleMin,
+        ...STOPPAGE_FIELDS.map((f) => e[f.key]),
+        e.othersRemark, // Remark
+        c.totalStoppageMin,
+        fmtNum(c.availableWorkingMin),
+        fmtNum(c.idealProductionQty),
+        c.effectiveMcRunTimeMin,
+        fmtNum(c.unreportedTimeMin),
+        fmtNum(c.availabilityRatio),
+        fmtNum(c.performanceRatio),
+        c.qualityRatio,
+        fmtNum(c.oeePercent),
+      ]
+        .filter((v) => v !== null && v !== undefined)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [entries, debouncedSheetSearch, machines]);
 
   // Fetch standard times when machine changes in modal
   const fetchStdTimes = (machineId) => {
@@ -531,7 +827,6 @@ const ProductionEntry = () => {
         if (res.data.isOk) {
           toast.success?.(`Entry ${editId ? 'updated' : 'saved'}!`);
           setShowModal(false);
-          setActiveMachine(values.machine);
           fetchSheet();
         }
       })
@@ -543,35 +838,75 @@ const ProductionEntry = () => {
       .finally(() => setSaving(false));
   };
 
-  const fmt = (n) => (n == null || isNaN(n) ? "—" : Number(n).toFixed(2));
+  const fmt = (n, unit = "") => (n == null || isNaN(n) ? "NA" : `${Number(n).toFixed(2)}${unit ? ` ${unit}` : ""}`);
+  const fmtRatioPct = (n) => (n == null || isNaN(n) ? "NA" : `${(Number(n) * 100).toFixed(2)}%`);
+  const UNIT_BY_CALC_KEY = useMemo(() => Object.fromEntries(CALC_COLUMNS.map((c) => [c.key, c.unit])), []);
   const err = (name) => submitted && formErrors[name] ? formErrors[name] : null;
 
   return (
     <div className="w-full">
-      {/* Header & Filters */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 gap-4">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 gap-4">
         <div className="flex items-center gap-2">
           <Factory className="w-5 h-5 text-brand-600" />
-          <h1 className="text-lg font-semibold text-slate-900">Production Data Entry</h1>
+          <h1 className="text-lg font-semibold text-slate-900">Grinding Data Entry</h1>
         </div>
         <div className="flex items-center gap-3 w-full sm:w-auto">
+          <button onClick={() => setShowEfficiency(true)}
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+            <Gauge className="w-4 h-4" /> Efficiency
+          </button>
+          {currentPagePermissions.create && (
+            <button onClick={openModal} title="Add a new grinding data entry"
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+              <Plus className="w-4 h-4" /> Add Entry
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap items-end gap-3 mb-6">
+        <div className="relative w-full sm:w-56">
+          <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Search</label>
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-[34px] -translate-y-1/2 pointer-events-none" />
+          <input
+            type="text"
+            value={sheetSearch}
+            onChange={(e) => setSheetSearch(e.target.value)}
+            placeholder="Search this table…"
+            className="w-full bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 rounded-xl pl-9 pr-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
+          />
+        </div>
+        <div className="w-full sm:w-56">
+          <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Machine</label>
           <select
             value={activeMachine}
             onChange={(e) => setActiveMachine(e.target.value)}
-            className="w-full sm:w-64 bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
+            className="w-full bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
           >
             <option value="">All Machines</option>
             {machines.map((m) => (
               <option key={m._id} value={m._id}>{m.machineName}</option>
             ))}
           </select>
-          {currentPagePermissions.create && (
-            <button onClick={openModal}
-              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-brand-600 hover:bg-blue-50 dark:bg-brand-900\/400 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
-              <Plus className="w-4 h-4" /> Add Entry
-            </button>
-          )}
         </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">From Date</label>
+          <DatePicker name="dateFrom" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} placeholder="Start date" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">To Date</label>
+          <DatePicker name="dateTo" value={dateTo} onChange={(e) => setDateTo(e.target.value)} placeholder="End date" />
+        </div>
+        {(dateFrom || dateTo || sheetSearch || activeMachine) && (
+          <button
+            onClick={() => { setSheetSearch(""); setActiveMachine(""); setDateFrom(""); setDateTo(""); }}
+            className="rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 transition-colors"
+          >
+            Clear Filters
+          </button>
+        )}
       </div>
 
       {/* Sheet table — header row & OEE column stay locked in place while scrolling, like an Excel freeze-pane */}
@@ -654,12 +989,12 @@ const ProductionEntry = () => {
             </tr>
           </thead>
           <tbody>
-            {entries.length === 0 && (
+            {filteredEntries.length === 0 && (
               <tr><td colSpan={10 + STOPPAGE_FIELDS.length + 1 + 5 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
-                {loadingSheet ? "Loading…" : "No entries for this machine yet."}
+                {loadingSheet ? "Loading…" : sheetSearch ? "No entries match your search." : "No entries for this machine yet."}
               </td></tr>
             )}
-            {entries.map((e) => {
+            {filteredEntries.map((e) => {
               const mName = typeof e.machine === "object" ? e.machine?.machineName : machines.find(m => m._id === e.machine)?.machineName;
               const c = e.calculated || {};
               const editable = isEntryEditable(parseLocalDate(e.date));
@@ -672,17 +1007,17 @@ const ProductionEntry = () => {
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcOffTime || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.sizeWidthMm}×{e.sizeHeightMm}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.thicknessMm} mm</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmt(e.standardTimePerPieceMin)}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.processQty}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.okQty}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold">{Number(e.processQty) - Number(e.okQty)}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmt(e.standardTimePerPieceMin, "min")}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.processQty} qty</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.okQty} qty</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold">{Number(e.processQty) - Number(e.okQty)} qty</td>
 
                 {/* Working Schedule Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.workingScheduleMin)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.workingScheduleMin, UNIT_BY_CALC_KEY.workingScheduleMin)}</td>
 
                 {/* Individual stoppage reason values */}
                 {STOPPAGE_FIELDS.map((f) => (
-                  <td key={f.key} className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmt(e[f.key])}</td>
+                  <td key={f.key} className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmt(e[f.key], "min")}</td>
                 ))}
 
                 {/* Remark — hidden by default, "eye" opens a popover with the Others-downtime note */}
@@ -702,24 +1037,24 @@ const ProductionEntry = () => {
                 </td>
 
                 {/* Total Stoppage */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.totalStoppageMin)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.totalStoppageMin, UNIT_BY_CALC_KEY.totalStoppageMin)}</td>
                 {/* Available Working Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.availableWorkingMin)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.availableWorkingMin, UNIT_BY_CALC_KEY.availableWorkingMin)}</td>
                 {/* Ideal Production */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.idealProductionQty)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.idealProductionQty, UNIT_BY_CALC_KEY.idealProductionQty)}</td>
                 {/* Effective M/C Run Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.effectiveMcRunTimeMin)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.effectiveMcRunTimeMin, UNIT_BY_CALC_KEY.effectiveMcRunTimeMin)}</td>
                 {/* Unreported Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.unreportedTimeMin)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.unreportedTimeMin, UNIT_BY_CALC_KEY.unreportedTimeMin)}</td>
 
                 {/* Availability / Performance / Quality Ratios */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.availabilityRatio)}</td>
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.performanceRatio)}</td>
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.qualityRatio)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtRatioPct(c.availabilityRatio)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtRatioPct(c.performanceRatio)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtRatioPct(c.qualityRatio)}</td>
 
                 {/* OEE % */}
                 <td className="sticky right-[90px] z-10 px-3 py-2 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-blue-50 dark:bg-slate-900 font-bold text-brand-700 dark:text-brand-300 shadow-[-4px_0_10px_rgba(0,0,0,0.05)] w-[100px] min-w-[100px] max-w-[100px]">
-                  {fmt(c.oeePercent)}%
+                  {fmt(c.oeePercent)}{c.oeePercent == null || isNaN(c.oeePercent) ? "" : "%"}
                 </td>
 
                 <td className="sticky right-0 z-10 w-[90px] px-3 py-2 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] shadow-[-4px_0_10px_rgba(0,0,0,0.05)]">
@@ -763,6 +1098,38 @@ const ProductionEntry = () => {
         </div>
       </div>
 
+      {/* Pagination — 20 rows per page by default. Hidden while actively
+          searching, since search pulls a wider batch to filter over instead
+          of just the current page. */}
+      {!isSearching && totalCount > 0 && (
+        <div className="flex items-center justify-between mt-3 px-1 text-sm text-slate-600 dark:text-slate-300">
+          <span>
+            Showing {Math.min((page - 1) * PAGE_SIZE + 1, totalCount)}–{Math.min(page * PAGE_SIZE, totalCount)} of {totalCount}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1 || loadingSheet}
+              className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] px-3 py-1.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              Previous
+            </button>
+            <span className="text-xs text-slate-500">
+              Page {page} of {Math.max(1, Math.ceil(totalCount / PAGE_SIZE))}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage((p) => (p * PAGE_SIZE < totalCount ? p + 1 : p))}
+              disabled={page * PAGE_SIZE >= totalCount || loadingSheet}
+              className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] px-3 py-1.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
       <FormulaPopover info={openFormula} onClose={() => setOpenFormula(null)} />
       <FormulaPopover
         info={openRemark ? { rect: openRemark.rect, label: "Remark", formula: openRemark.text?.trim() || "No remark entered." } : null}
@@ -778,7 +1145,7 @@ const ProductionEntry = () => {
             {/* Modal header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-white dark:bg-[#1a1a1a] shrink-0 rounded-t-2xl z-10">
               <div>
-                <h2 className="text-base font-semibold text-slate-900">Production Data Entry</h2>
+                <h2 className="text-base font-semibold text-slate-900">Grinding Data Entry</h2>
                 <p className="text-xs text-slate-400 mt-0.5">Fields marked <span className="text-red-500">*</span> are required</p>
               </div>
               <button onClick={closeModal} className="p-1.5 rounded-lg hover:bg-slate-100 dark:bg-slate-800 text-slate-500"><X className="w-5 h-5" /></button>
@@ -932,8 +1299,20 @@ const ProductionEntry = () => {
                     <input type="number" name="processQty" value={values.processQty} onChange={handleChange} onWheel={(e) => e.target.blur()}
                       onInput={(e) => e.target.value = e.target.value.slice(0, 30)}
                       min={1} step={1} className={cls(err("processQty"))} placeholder="Enter quantity" />
-                    {err("processQty") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("processQty")}</p>}
+                    {err("processQty") && !err("processQty").startsWith("Not achievable") && (
+                      <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("processQty")}</p>
+                    )}
                   </div>
+
+                  {/* Capacity ("Not achievable") error — rendered as a prominent full-width
+                      alert instead of the tiny inline field message, since missing this one
+                      is the difference between a save that silently fails and one that doesn't. */}
+                  {err("processQty") && err("processQty").startsWith("Not achievable") && (
+                    <div className="sm:col-span-2 flex items-start gap-2 rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3.5 py-2.5">
+                      <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                      <p className="text-xs sm:text-sm font-semibold text-red-700 dark:text-red-300 leading-snug">{err("processQty")}</p>
+                    </div>
+                  )}
 
                   <div>
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
@@ -1007,7 +1386,7 @@ const ProductionEntry = () => {
                   Cancel
                 </button>
                 <button type="submit" disabled={saving}
-                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 hover:bg-blue-50 dark:bg-brand-900/400 text-white text-sm font-semibold px-5 py-2 shadow-sm disabled:opacity-70">
+                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-5 py-2 shadow-sm disabled:opacity-70">
                   {saving ? (
                     <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
@@ -1023,8 +1402,10 @@ const ProductionEntry = () => {
 
       <DeleteModal show={!!deleteId} toggle={() => setDeleteId(null)}
         handleDelete={handleDelete} disabled={isDeleteLoading} />
+
+      {showEfficiency && <EfficiencyModal onClose={() => setShowEfficiency(false)} />}
     </div>
   );
 };
 
-export default ProductionEntry;
+export default GrindingEntry;

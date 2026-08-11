@@ -4,6 +4,7 @@ import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
 import DeleteModal from "../Components/Common/DeleteModal";
+import StatusCheckbox from "../Components/Common/StatusCheckbox";
 import { useInvalidateOperators } from "../hooks/useOperators";
 import {
   createOperator,
@@ -181,7 +182,7 @@ const OperatorMaster = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isDeleteLoading, setIsDeleteLoading] = useState(false);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("All");
+  const [activeOnly, setActiveOnly] = useState(true);
 
   const [showAddModal, setShowAddModal] = useState(false);
   const [editItem, setEditItem] = useState(null);       // { _id, name, code, isActive }
@@ -193,7 +194,7 @@ const OperatorMaster = () => {
       skip: 0,
       per_page: 200,
       match: query || undefined,
-      isActive: filter === "Active" ? true : filter === "Inactive" ? false : undefined,
+      isActive: activeOnly,
     })
       .then((res) => setOperators(res.data?.data?.[0]?.data || []))
       .catch(() => toast.error?.("Failed to load operators"))
@@ -203,7 +204,7 @@ const OperatorMaster = () => {
   useEffect(() => {
     fetchOperators();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, filter]);
+  }, [query, activeOnly]);
 
   const openEdit = (id) => {
     getOperatorById(id)
@@ -256,15 +257,7 @@ const OperatorMaster = () => {
           onChange={(e) => setQuery(e.target.value)}
           className="w-full sm:w-64 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
         />
-        <select
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          className="ml-auto w-full sm:w-40 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white text-slate-700"
-        >
-          <option value="All">All Status</option>
-          <option value="Active">Active Only</option>
-          <option value="Inactive">Inactive Only</option>
-        </select>
+        <StatusCheckbox checked={activeOnly} onChange={setActiveOnly} className="sm:ml-auto" />
       </div>
 
       {/* Table */}

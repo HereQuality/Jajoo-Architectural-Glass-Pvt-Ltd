@@ -100,15 +100,15 @@ export default function Dashboard() {
     }
   };
 
-  // Always today — deliberately ignores the Efficiency Report's From/To
-  // range above. Use "Custom Report…" for a filtered/date-ranged PDF.
-  // Which process(es) to include is picked in the popup right before this runs.
+  // Uses the same From/To range shown in the Efficiency Report card above,
+  // so the PDF always matches what's on screen. Which process(es) to
+  // include is picked in the popup right before this runs.
   const runQuickDownload = async (processIds) => {
     setDownloadingQuick(true);
     try {
-      const today = todayStr();
-      const res = await downloadDashboardOeeReport({ from: today, to: today, processes: processIds.join(",") });
-      triggerBlobDownload(res.data, `OEE-Report_${today}.pdf`);
+      const res = await downloadDashboardOeeReport({ from: reportFrom, to: reportTo, processes: processIds.join(",") });
+      const suffix = reportFrom === reportTo ? reportFrom : `${reportFrom}_to_${reportTo}`;
+      triggerBlobDownload(res.data, `OEE-Report_${suffix}.pdf`);
       setShowQuickDownloadPicker(false);
     } catch (err) {
       console.error("Failed to download report", err);
@@ -251,7 +251,7 @@ export default function Dashboard() {
                 <button
                   onClick={() => setShowQuickDownloadPicker(true)}
                   disabled={downloadingQuick}
-                  title="Pick one or more processes, then download today's PDF for just their machines"
+                  title="Pick one or more processes, then download the PDF (for the From/To range above) for just their machines"
                   className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors disabled:opacity-60"
                 >
                   <Download className="w-4 h-4" />
@@ -267,103 +267,40 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="overflow-x-auto w-full">
-              <table className="w-full text-center border-collapse text-sm min-w-[700px]">
-                <tbody>
-                  {/* Row 1 */}
-                  <tr>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Available Working Time (mins)
-                    </td>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Working/ scheduled time (min)
-                    </td>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Availability Ratio
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
-                      {reportData.availMin}
-                    </td>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
-                      {reportData.workMin}
-                    </td>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-[#f8f9fa] dark:bg-slate-800 text-slate-900 dark:text-white font-semibold">
-                      {reportData.availRatio}
-                    </td>
-                  </tr>
+            {/* Stat cards — grid instead of a fixed-width table, so it stacks
+                to 1/2/3 columns instead of forcing horizontal scroll on
+                tablet/phone. Every 3rd item (the ratio) keeps its distinct
+                shaded background from the original table layout. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {[
+                { label: "Available Working Time (mins)", value: reportData.availMin },
+                { label: "Working/ scheduled time (min)", value: reportData.workMin },
+                { label: "Availability Ratio", value: reportData.availRatio, highlight: true },
+                { label: "OK Quantity", value: reportData.okQty },
+                { label: "Process Quantity (Total Qty)", value: reportData.processQty },
+                { label: "Quality Ratio", value: reportData.qualRatio, highlight: true },
+                { label: "Process Quantity (Total Qty)", value: reportData.processQty },
+                { label: "Ideal Quantity", value: reportData.idealQty },
+                { label: "Performance Ratio", value: reportData.perfRatio, highlight: true },
+              ].map((item, i) => (
+                <div key={i} className="rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden">
+                  <div className="bg-[#0a1930] text-white font-semibold py-2 px-4 text-sm">{item.label}</div>
+                  <div className={`py-3 px-4 text-sm font-medium ${
+                    item.highlight
+                      ? "bg-[#f8f9fa] dark:bg-slate-800 text-slate-900 dark:text-white font-semibold"
+                      : "bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200"
+                  }`}>
+                    {item.value}
+                  </div>
+                </div>
+              ))}
+            </div>
 
-                  {/* Spacer */}
-                  <tr><td colSpan={3} className="h-4"></td></tr>
-
-                  {/* Row 2 */}
-                  <tr>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      OK Quantity
-                    </td>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Process Quantity (Total Qty)
-                    </td>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Quality Ratio
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
-                      {reportData.okQty}
-                    </td>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
-                      {reportData.processQty}
-                    </td>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-[#f8f9fa] dark:bg-slate-800 text-slate-900 dark:text-white font-semibold">
-                      {reportData.qualRatio}
-                    </td>
-                  </tr>
-
-                  {/* Spacer */}
-                  <tr><td colSpan={3} className="h-4"></td></tr>
-
-                  {/* Row 3 */}
-                  <tr>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Process Quantity (Total Qty)
-                    </td>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Ideal Quantity
-                    </td>
-                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
-                      Performance Ratio
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
-                      {reportData.processQty}
-                    </td>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
-                      {reportData.idealQty}
-                    </td>
-                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-[#f8f9fa] dark:bg-slate-800 text-slate-900 dark:text-white font-semibold">
-                      {reportData.perfRatio}
-                    </td>
-                  </tr>
-
-                  {/* Spacer */}
-                  <tr><td colSpan={3} className="h-4"></td></tr>
-
-                  {/* Row 4: Final OEE */}
-                  <tr>
-                    <td colSpan={3} className="bg-[#0a1930] text-white font-bold text-lg py-3 px-4 border border-slate-300 dark:border-slate-700 tracking-wide uppercase">
-                      OEE %
-                    </td>
-                  </tr>
-                  <tr>
-                    <td colSpan={3} className="py-4 px-4 border border-slate-300 dark:border-slate-700 bg-[#f0f4f8] dark:bg-slate-800 text-[#0f172a] dark:text-white font-extrabold text-2xl">
-                      {reportData.oee}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <div className="mt-3 rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden">
+              <div className="bg-[#0a1930] text-white font-bold text-lg py-3 px-4 tracking-wide uppercase text-center">OEE %</div>
+              <div className="py-4 px-4 bg-[#f0f4f8] dark:bg-slate-800 text-[#0f172a] dark:text-white font-extrabold text-2xl text-center">
+                {reportData.oee}
+              </div>
             </div>
 
           </div>

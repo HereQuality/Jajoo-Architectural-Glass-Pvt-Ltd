@@ -109,7 +109,10 @@ exports.listProcessByParams = async (req, res) => {
 
     let query = {};
     if (match) {
-      query.$or = [{ processName: { $regex: match, $options: "i" } }];
+      query.$or = [
+        { processName: { $regex: match, $options: "i" } },
+        { description: { $regex: match, $options: "i" } },
+      ];
     }
 
     if (isActive !== undefined) {

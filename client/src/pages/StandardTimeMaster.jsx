@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useContext } from "react";
+import React, { useState, useEffect, useContext, useMemo } from "react";
 import { Pencil, Trash2, Clock, Plus, X } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
 import { useMachines } from "../hooks/useMachines";
+import { useProcesses } from "../hooks/useProcesses";
 import DeleteModal from "../Components/Common/DeleteModal";
+import StatusCheckbox from "../Components/Common/StatusCheckbox";
 import {
   createStandardTime,
   updateStandardTime,
@@ -12,6 +14,8 @@ import {
   getStandardTimeById,
   searchStandardTimes,
 } from "../api/standardTime.api";
+
+const PAGE_SIZE = 20;
 
 // ── Validation ────────────────────────────────────────────────────────────
 const validate = (v) => {
@@ -35,14 +39,35 @@ const validate = (v) => {
 const INIT = { machine: "", sizeWidthMm: "", sizeHeightMm: "", thicknessMm: "", standardTimeMin: "", isActive: true };
 
 // ── Add / Edit Modal ──────────────────────────────────────────────────────
-const STModal = ({ mode, initialValues, machines, onClose, onSaved }) => {
+const STModal = ({ mode, initialValues, machines, processes, onClose, onSaved }) => {
   const toast = useAlert() || toastify;
   const [v, setV] = useState(initialValues);
   const [errs, setErrs] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Process filter for the Machine dropdown — purely a UI narrowing aid
+  // (StandardTime only stores `machine`; the process is implied by the
+  // machine's own `processes` list on the Machine master), same pattern
+  // as the Process→Machine cascade on the Grinding Data Entry form.
+  const [process, setProcess] = useState(() => {
+    const initMachine = machines.find((m) => m._id === initialValues.machine);
+    const firstProcess = initMachine?.processes?.[0];
+    return firstProcess ? (typeof firstProcess === "object" ? firstProcess._id : firstProcess) : "";
+  });
+  const filteredMachines = useMemo(() => {
+    if (!process) return machines;
+    return machines.filter((m) =>
+      (m.processes || []).some((p) => (typeof p === "object" ? p._id : p) === process)
+    );
+  }, [machines, process]);
+
   const set = (name, value) => setV((prev) => ({ ...prev, [name]: value }));
+
+  const handleProcessChange = (e) => {
+    setProcess(e.target.value);
+    set("machine", "");
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -96,14 +121,29 @@ const STModal = ({ mode, initialValues, machines, onClose, onSaved }) => {
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {/* Process — narrows the Machine dropdown below */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Process</label>
+            <select
+              value={process}
+              onChange={handleProcessChange}
+              className="w-full border rounded-xl px-3.5 py-2.5 text-sm outline-none transition-shadow border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
+            >
+              <option value="">All Processes</option>
+              {processes.map((p) => (
+                <option key={p._id} value={p._id}>{p.processName}</option>
+              ))}
+            </select>
+          </div>
+
           {/* Machine */}
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">
               Machine <span className="text-red-500">*</span>
             </label>
             <select {...inp("machine")}>
-              <option value="">Select Machine</option>
-              {machines.map((m) => (
+              <option value="">{filteredMachines.length === 0 ? "— No machines for this process —" : "Select Machine"}</option>
+              {filteredMachines.map((m) => (
                 <option key={m._id} value={m._id}>{m.machineName}</option>
               ))}
             </select>
@@ -217,12 +257,16 @@ const StandardTimeMaster = () => {
   const { currentPagePermissions = { read: true, write: true, edit: true, delete: true } } =
     useContext(MenuContext) || {};
   const { data: machines = [] } = useMachines();
+  const { data: processes = [] } = useProcesses();
 
   const [records, setRecords] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
   const [isDeleteLoading, setIsDeleteLoading] = useState(false);
+  const [filterProcess, setFilterProcess] = useState("");
   const [filterMachine, setFilterMachine] = useState("");
-  const [filterActive, setFilterActive] = useState("All");
+  const [activeOnly, setActiveOnly] = useState(true);
 
   const [showAdd, setShowAdd] = useState(false);
   const [editItem, setEditItem] = useState(null);
@@ -231,17 +275,24 @@ const StandardTimeMaster = () => {
   const fetchRecords = () => {
     setIsLoading(true);
     searchStandardTimes({
-      skip: 0,
-      per_page: 300,
+      skip: (page - 1) * PAGE_SIZE,
+      per_page: PAGE_SIZE,
       machine: filterMachine || undefined,
-      isActive: filterActive === "Active" ? true : filterActive === "Inactive" ? false : undefined,
+      isActive: activeOnly,
     })
-      .then((res) => setRecords(res.data?.data?.[0]?.data || []))
+      .then((res) => {
+        setRecords(res.data?.data?.[0]?.data || []);
+        setTotalCount(res.data?.data?.[0]?.count || 0);
+      })
       .catch(() => toast.error?.("Failed to load standard times"))
       .finally(() => setIsLoading(false));
   };
 
-  useEffect(() => { fetchRecords(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filterMachine, filterActive]);
+  useEffect(() => { fetchRecords(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filterMachine, activeOnly, page]);
+
+  // A filter change should reset back to page 1 — otherwise a narrower
+  // filter could land on a now out-of-range page.
+  useEffect(() => { setPage(1); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [filterMachine, activeOnly]);
 
   const openEdit = (id) => {
     getStandardTimeById(id).then((res) => {
@@ -267,7 +318,17 @@ const StandardTimeMaster = () => {
       .finally(() => setIsDeleteLoading(false));
   };
 
-  const allMachinesForFilter = machines;
+  const allMachinesForFilter = useMemo(() => {
+    if (!filterProcess) return machines;
+    return machines.filter((m) =>
+      (m.processes || []).some((p) => (typeof p === "object" ? p._id : p) === filterProcess)
+    );
+  }, [machines, filterProcess]);
+
+  const handleFilterProcessChange = (e) => {
+    setFilterProcess(e.target.value);
+    setFilterMachine("");
+  };
 
   return (
     <div className="p-4 sm:p-6">
@@ -288,7 +349,17 @@ const StandardTimeMaster = () => {
       </div>
 
       {/* Filters */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 mb-4 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 mb-4 flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-3">
+        <select
+          value={filterProcess}
+          onChange={handleFilterProcessChange}
+          className="w-full sm:w-56 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
+        >
+          <option value="">All Processes</option>
+          {processes.map((p) => (
+            <option key={p._id} value={p._id}>{p.processName}</option>
+          ))}
+        </select>
         <select
           value={filterMachine}
           onChange={(e) => setFilterMachine(e.target.value)}
@@ -299,15 +370,7 @@ const StandardTimeMaster = () => {
             <option key={m._id} value={m._id}>{m.machineName}</option>
           ))}
         </select>
-        <select
-          value={filterActive}
-          onChange={(e) => setFilterActive(e.target.value)}
-          className="ml-auto w-full sm:w-40 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white text-slate-700"
-        >
-          <option value="All">All Status</option>
-          <option value="Active">Active Only</option>
-          <option value="Inactive">Inactive Only</option>
-        </select>
+        <StatusCheckbox checked={activeOnly} onChange={setActiveOnly} className="sm:ml-auto" />
       </div>
 
       {/* Table */}
@@ -316,6 +379,7 @@ const StandardTimeMaster = () => {
           <thead>
             <tr className="bg-slate-50 text-slate-600 text-left">
               <th className="px-4 py-3 font-medium whitespace-nowrap">Machine</th>
+              <th className="px-4 py-3 font-medium whitespace-nowrap">Process</th>
               <th className="px-4 py-3 font-medium whitespace-nowrap">Size (mm)</th>
               <th className="px-4 py-3 font-medium whitespace-nowrap">Thickness (mm)</th>
               <th className="px-4 py-3 font-medium whitespace-nowrap">Std. Time (min)</th>
@@ -326,7 +390,7 @@ const StandardTimeMaster = () => {
           <tbody>
             {records.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-slate-400">
+                <td colSpan={7} className="px-4 py-10 text-center text-slate-400">
                   {isLoading ? "Loading…" : "No records found. Click 'Add Standard Time' to create one."}
                 </td>
               </tr>
@@ -334,6 +398,9 @@ const StandardTimeMaster = () => {
             {records.map((r) => (
               <tr key={r._id} className="border-t border-slate-100 hover:bg-slate-50/50 transition-colors">
                 <td className="px-4 py-3 font-medium text-slate-800">{r.machine?.machineName || "—"}</td>
+                <td className="px-4 py-3 text-slate-600">
+                  {(r.machine?.processes || []).map((p) => p.processName).join(", ") || "—"}
+                </td>
                 <td className="px-4 py-3 text-slate-600 font-mono text-xs">
                   {r.sizeWidthMm} × {r.sizeHeightMm}
                 </td>
@@ -368,12 +435,41 @@ const StandardTimeMaster = () => {
         </table>
       </div>
 
+      {totalCount > 0 && (
+        <div className="flex items-center justify-between mt-3 px-1 text-sm text-slate-600">
+          <span>
+            Showing {Math.min((page - 1) * PAGE_SIZE + 1, totalCount)}–{Math.min(page * PAGE_SIZE, totalCount)} of {totalCount}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1 || isLoading}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
+            >
+              Previous
+            </button>
+            <span className="text-xs text-slate-500">
+              Page {page} of {Math.max(1, Math.ceil(totalCount / PAGE_SIZE))}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage((p) => (p * PAGE_SIZE < totalCount ? p + 1 : p))}
+              disabled={page * PAGE_SIZE >= totalCount || isLoading}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
       {showAdd && (
-        <STModal mode="add" initialValues={INIT} machines={machines}
+        <STModal mode="add" initialValues={INIT} machines={machines} processes={processes}
           onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); fetchRecords(); }} />
       )}
       {editItem && (
-        <STModal mode="edit" initialValues={editItem} machines={machines}
+        <STModal mode="edit" initialValues={editItem} machines={machines} processes={processes}
           onClose={() => setEditItem(null)} onSaved={() => { setEditItem(null); fetchRecords(); }} />
       )}
       <DeleteModal show={!!deleteId} toggle={() => setDeleteId(null)}

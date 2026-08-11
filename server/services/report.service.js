@@ -133,9 +133,10 @@ function buildOeeReportPdf({ entries, filterDescription, from, to, columns }) {
 // ── Per-machine "Efficiency Report (OEE)" PDF — mirrors the Dashboard's
 // on-screen card (3-column grid, navy headers, big OEE% footer), repeated
 // once per machine. This is what the Dashboard's quick "Download PDF"
-// button uses — it always covers every machine, ignoring any process/
-// machine filter, unlike the filterable Custom Report (buildOeeReportPdf
-// above). ──────────────────────────────────────────────────────────────
+// button uses — scoped to whichever process(es) the user picks in that
+// popup (every machine tagged under them, zero-filled if no entries),
+// unlike the more broadly filterable Custom Report (buildOeeReportPdf
+// above), which also allows a single specific machine. ─────────────────
 const minFmt = (n) => Number(n || 0).toFixed(2);
 const qtyFmt = (n) => String(Math.round(Number(n || 0)));
 const pctFmt = (n) => Number(n || 0).toFixed(2) + "%";

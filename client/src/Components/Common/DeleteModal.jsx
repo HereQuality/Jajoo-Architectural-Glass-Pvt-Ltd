@@ -1,6 +1,21 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 
 const DeleteModal = ({ show, handleDelete, toggle, disabled }) => {
+  // Keyboard shortcuts while the confirm dialog is open: Enter confirms
+  // delete, Escape cancels — same pattern used everywhere this modal is
+  // rendered (Machine/Operator/Process/Standard Time Master, etc.), so this
+  // one component covers the whole app.
+  useEffect(() => {
+    if (!show) return;
+    const onKeyDown = (e) => {
+      if (disabled) return;
+      if (e.key === 'Enter') { e.preventDefault(); handleDelete(e); }
+      else if (e.key === 'Escape') { e.preventDefault(); toggle(); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [show, disabled, handleDelete, toggle]);
+
   if (!show) return null;
 
   return (

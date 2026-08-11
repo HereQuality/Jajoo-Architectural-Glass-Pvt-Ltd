@@ -8,6 +8,7 @@ const {
   deleteProductionEntry,
   getProductionEntryById,
   listProductionEntries,
+  getProductionEfficiency,
 } = require("../controllers/productionEntry.controller");
 
 const router = express.Router();
@@ -19,6 +20,7 @@ router.use(authorize("SuperAdmin", "Employee"));
 
 router.post("/", requireMenuPermission(MENU_URL, "write"), createProductionEntry);
 router.get("/", requireMenuPermission(MENU_URL, "read"), listProductionEntries);
+router.get("/efficiency", requireMenuPermission(MENU_URL, "read"), getProductionEfficiency);
 router.get("/:entryId", requireMenuPermission(MENU_URL, "read"), getProductionEntryById);
 router.put(
   "/:entryId",

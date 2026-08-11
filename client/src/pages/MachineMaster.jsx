@@ -4,6 +4,8 @@ import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
 import DeleteModal from "../Components/Common/DeleteModal";
+import Tooltip from "../Components/Common/Tooltip";
+import StatusCheckbox from "../Components/Common/StatusCheckbox";
 import { useInvalidateMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import {
@@ -259,7 +261,7 @@ const MachineMaster = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isDeleteLoading, setIsDeleteLoading] = useState(false);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState("All");
+  const [activeOnly, setActiveOnly] = useState(true);
 
   // Modals
   const [showAddModal, setShowAddModal] = useState(false);
@@ -273,14 +275,14 @@ const MachineMaster = () => {
       skip: 0,
       per_page: 200,
       match: query || undefined,
-      isActive: filter === "Active" ? true : filter === "Inactive" ? false : undefined,
+      isActive: activeOnly,
     })
       .then((res) => setMachines(res.data?.data?.[0]?.data || []))
       .catch(() => toast.error?.("Failed to load machines"))
       .finally(() => setIsLoading(false));
   };
 
-  useEffect(() => { fetchMachines(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [query, filter]);
+  useEffect(() => { fetchMachines(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [query, activeOnly]);
 
   const openEdit = (id) => {
     getMachineById(id)
@@ -341,15 +343,7 @@ const MachineMaster = () => {
           onChange={(e) => setQuery(e.target.value)}
           className="w-full sm:w-64 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
         />
-        <select
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          className="ml-auto w-full sm:w-40 border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white text-slate-700"
-        >
-          <option value="All">All Status</option>
-          <option value="Active">Active Only</option>
-          <option value="Inactive">Inactive Only</option>
-        </select>
+        <StatusCheckbox checked={activeOnly} onChange={setActiveOnly} className="sm:ml-auto" />
       </div>
 
       {/* Table */}
@@ -377,7 +371,11 @@ const MachineMaster = () => {
               <tr key={m._id} className="border-t border-slate-100 hover:bg-slate-50/50 transition-colors">
                 <td className="px-4 py-3 text-slate-800 font-medium">{m.machineName}</td>
                 <td className="px-4 py-3 text-slate-600 font-mono text-xs">{m.machineCode || "—"}</td>
-                <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{m.description || "—"}</td>
+                <td className="px-4 py-3 text-slate-500 max-w-xs">
+                  <Tooltip text={m.description}>
+                    <span className="block truncate">{m.description || "—"}</span>
+                  </Tooltip>
+                </td>
                 <td className="px-4 py-3">
                   {(m.processes || []).length === 0 ? (
                     <span className="text-slate-400">—</span>
