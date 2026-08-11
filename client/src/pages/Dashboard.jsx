@@ -1,0 +1,672 @@
+import React, { useState, useEffect, useContext, useMemo } from "react";
+import { Factory, TrendingUp, AlertCircle, Clock, Activity, BarChart2, Calendar, Download, X } from "lucide-react";
+import { toast as toastify } from "react-toastify";
+import { useAlert } from "../context/AlertContext";
+import { ThemeContext } from "../context/ThemeContext";
+import { listProductionEntries } from "../api/productionEntries.api";
+import { downloadOeeReport, downloadDashboardOeeReport } from "../api/reports.api";
+import { useMachines } from "../hooks/useMachines";
+import { useProcesses } from "../hooks/useProcesses";
+import DatePicker from "../Components/Common/DatePicker";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, ReferenceLine, Cell, LabelList
+} from "recharts";
+
+// ── Report column picker options (must match server/services/report.service.js ALL_COLUMNS keys) ──
+const REPORT_COLUMNS = [
+  { key: "availMin", label: "Available Working (min)" },
+  { key: "workMin", label: "Working Schedule (min)" },
+  { key: "availRatio", label: "Availability Ratio" },
+  { key: "okQty", label: "OK Qty" },
+  { key: "processQty", label: "Process Qty" },
+  { key: "qualRatio", label: "Quality Ratio" },
+  { key: "idealQty", label: "Ideal Qty" },
+  { key: "perfRatio", label: "Performance Ratio" },
+  { key: "oee", label: "OEE %" },
+];
+
+// Triggers a browser download from an axios blob response.
+const triggerBlobDownload = (blobData, fallbackFilename) => {
+  const blob = new Blob([blobData], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fallbackFilename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+
+export default function Dashboard() {
+  const { isDarkMode } = useContext(ThemeContext);
+  const toast = useAlert() || toastify;
+  const { data: machines = [] } = useMachines();
+  const { data: processes = [] } = useProcesses();
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [downloadingQuick, setDownloadingQuick] = useState(false);
+  const [showCustomReport, setShowCustomReport] = useState(false);
+  const [showQuickDownloadPicker, setShowQuickDownloadPicker] = useState(false);
+
+  // Filters
+  const [selectedMachine, setSelectedMachine] = useState("all");
+  const [selectedProcess, setSelectedProcess] = useState("all");
+
+  // Only show machines that belong to the selected process
+  const filteredMachines = useMemo(() => {
+    if (selectedProcess === "all") return machines;
+    return machines.filter((m) =>
+      (m.processes || []).some((p) => (typeof p === "object" ? p._id : p) === selectedProcess)
+    );
+  }, [machines, selectedProcess]);
+
+  const handleProcessChange = (e) => {
+    setSelectedProcess(e.target.value);
+    setSelectedMachine("all"); // reset so a stale machine from another process can't stay selected
+  };
+
+  // Date filter for chart (Month-Year)
+    const [chartMonth, setChartMonth] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  });
+
+  // Date range filter for Efficiency Report
+  const todayStr = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const [reportFrom, setReportFrom] = useState(todayStr);
+  const [reportTo, setReportTo] = useState(todayStr);
+
+  useEffect(() => {
+    fetchData();
+  }, [selectedMachine, selectedProcess]); // Fetch monthly data
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      let query = { per_page: 2000 };
+      if (selectedMachine !== "all") query.machine = selectedMachine;
+      if (selectedProcess !== "all") query.process = selectedProcess;
+
+      const res = await listProductionEntries(query);
+      setEntries(res.data?.data || []);
+    } catch (err) {
+      console.error("Failed to fetch dashboard data", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Always today — deliberately ignores the Efficiency Report's From/To
+  // range above. Use "Custom Report…" for a filtered/date-ranged PDF.
+  // Which process(es) to include is picked in the popup right before this runs.
+  const runQuickDownload = async (processIds) => {
+    setDownloadingQuick(true);
+    try {
+      const today = todayStr();
+      const res = await downloadDashboardOeeReport({ from: today, to: today, processes: processIds.join(",") });
+      triggerBlobDownload(res.data, `OEE-Report_${today}.pdf`);
+      setShowQuickDownloadPicker(false);
+    } catch (err) {
+      console.error("Failed to download report", err);
+      toast.error?.("Failed to download report");
+    } finally {
+      setDownloadingQuick(false);
+    }
+  };
+
+  // ── OEE Chart Data (Image 2 logic) ──
+  const trendData = useMemo(() => {
+    const [year, month] = chartMonth.split('-');
+    const monthPrefix = `${year}-${month}`;
+    const dateStats = {};
+    entries.forEach(e => {
+      if (typeof e.date !== 'string' || !e.date.startsWith(monthPrefix)) return;
+      // Use local date string YYYY-MM-DD
+      // Extract just the YYYY-MM-DD part and split it to avoid timezone shifts
+      const datePart = e.date.split('T')[0];
+      const [y, m, d] = datePart.split('-');
+      const dStr = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${y}`;
+      const realDateObj = new Date(Number(y), Number(m)-1, Number(d));
+      if (!dateStats[dStr]) dateStats[dStr] = { dateStr: dStr, realDate: realDateObj, sumOee: 0, count: 0 };
+      dateStats[dStr].sumOee += (e.calculated?.oeePercent || 0);
+      dateStats[dStr].count += 1;
+    });
+
+    return Object.values(dateStats)
+      .sort((a,b) => a.realDate - b.realDate)
+      .map(d => ({
+        date: d.dateStr,
+        OEE: Number((d.sumOee / d.count).toFixed(2))
+      }));
+  }, [entries, chartMonth]);
+
+  // ── Efficiency Report Data (Image 3 logic) ──
+  const reportData = useMemo(() => {
+    // Filter by selected date range (inclusive)
+    const dayEntries = entries.filter(e => {
+      if (typeof e.date !== 'string') return false;
+      const datePart = e.date.split('T')[0];
+      return datePart >= reportFrom && datePart <= reportTo;
+    });
+
+    let sumWork = 0;
+    let sumAvail = 0;
+    let sumProcess = 0;
+    let sumOk = 0;
+    let sumIdeal = 0;
+
+    dayEntries.forEach(e => {
+      sumWork += (e.calculated?.workingScheduleMin || 0);
+      sumAvail += (e.calculated?.availableWorkingMin || 0);
+      sumProcess += (Number(e.processQty) || 0);
+      sumOk += (Number(e.okQty) || 0);
+      sumIdeal += (e.calculated?.idealProductionQty || 0);
+    });
+
+    const availRatio = sumWork > 0 ? (sumAvail / sumWork) * 100 : 0;
+    const qualRatio = sumProcess > 0 ? (sumOk / sumProcess) * 100 : 0;
+    const perfRatio = sumIdeal > 0 ? (sumProcess / sumIdeal) * 100 : 0;
+    const oee = (availRatio / 100) * (perfRatio / 100) * (qualRatio / 100) * 100;
+
+    return {
+      workMin: sumWork.toFixed(2),
+      availMin: sumAvail.toFixed(2),
+      availRatio: availRatio.toFixed(2) + "%",
+      processQty: sumProcess,
+      okQty: sumOk,
+      qualRatio: qualRatio.toFixed(2) + "%",
+      idealQty: sumIdeal.toFixed(2),
+      perfRatio: perfRatio.toFixed(2) + "%",
+      oee: oee.toFixed(2) + "%"
+    };
+  }, [entries, reportFrom, reportTo]);
+
+  const cardStyle = "bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-5";
+  const titleStyle = "text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4";
+  const inputStyle = "bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500 dark:text-slate-200";
+
+  return (
+    <div className="max-w-[1400px] mx-auto space-y-6">
+      {/* Header & Global Filters */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+            <BarChart2 className="w-6 h-6 text-brand-600 dark:text-brand-400" />
+            Dashboard
+          </h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">OEE Analytics & Efficiency Reports</p>
+        </div>
+        
+        <div className="flex items-center gap-3">
+          <select
+            value={selectedProcess}
+            onChange={handleProcessChange}
+            className={inputStyle}
+          >
+            <option value="all">All Processes</option>
+            {processes.map(p => <option key={p._id} value={p._id}>{p.processName}</option>)}
+          </select>
+          <select
+            value={selectedMachine}
+            onChange={e => setSelectedMachine(e.target.value)}
+            className={inputStyle}
+          >
+            <option value="all">All Machines</option>
+            {filteredMachines.map(m => <option key={m._id} value={m._id}>{m.machineName}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="h-64 flex items-center justify-center text-slate-400">Loading metrics...</div>
+      ) : (
+        <div className="space-y-6">
+
+          {/* Efficiency Report Section */}
+          <div className={cardStyle}>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 pb-4 border-b border-slate-200 dark:border-slate-800 gap-4">
+              <h2 className={titleStyle} style={{marginBottom: 0}}>Efficiency Report (OEE)</h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <Calendar className="w-4 h-4 text-slate-500" />
+                <span className="text-sm text-slate-600 dark:text-slate-300 font-medium mr-1">From:</span>
+                <div className="w-40">
+                  <DatePicker
+                    name="reportFrom"
+                    value={reportFrom}
+                    onChange={e => setReportFrom(e.target.value)}
+                  />
+                </div>
+                <span className="text-sm text-slate-600 dark:text-slate-300 font-medium">To:</span>
+                <div className="w-40">
+                  <DatePicker
+                    name="reportTo"
+                    value={reportTo}
+                    onChange={e => setReportTo(e.target.value)}
+                  />
+                </div>
+                <button
+                  onClick={() => setShowQuickDownloadPicker(true)}
+                  disabled={downloadingQuick}
+                  title="Pick one or more processes, then download today's PDF for just their machines"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors disabled:opacity-60"
+                >
+                  <Download className="w-4 h-4" />
+                  {downloadingQuick ? "Downloading…" : "Download PDF"}
+                </button>
+                <button
+                  onClick={() => setShowCustomReport(true)}
+                  title="Build a custom report (date range, machine/process, columns)"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 transition-colors"
+                >
+                  Custom Report…
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto w-full">
+              <table className="w-full text-center border-collapse text-sm min-w-[700px]">
+                <tbody>
+                  {/* Row 1 */}
+                  <tr>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Available Working Time (mins)
+                    </td>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Working/ scheduled time (min)
+                    </td>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Availability Ratio
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
+                      {reportData.availMin}
+                    </td>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
+                      {reportData.workMin}
+                    </td>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-[#f8f9fa] dark:bg-slate-800 text-slate-900 dark:text-white font-semibold">
+                      {reportData.availRatio}
+                    </td>
+                  </tr>
+
+                  {/* Spacer */}
+                  <tr><td colSpan={3} className="h-4"></td></tr>
+
+                  {/* Row 2 */}
+                  <tr>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      OK Quantity
+                    </td>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Process Quantity (Total Qty)
+                    </td>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Quality Ratio
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
+                      {reportData.okQty}
+                    </td>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
+                      {reportData.processQty}
+                    </td>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-[#f8f9fa] dark:bg-slate-800 text-slate-900 dark:text-white font-semibold">
+                      {reportData.qualRatio}
+                    </td>
+                  </tr>
+
+                  {/* Spacer */}
+                  <tr><td colSpan={3} className="h-4"></td></tr>
+
+                  {/* Row 3 */}
+                  <tr>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Process Quantity (Total Qty)
+                    </td>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Ideal Quantity
+                    </td>
+                    <td className="w-1/3 bg-[#0a1930] text-white font-semibold py-2 px-4 border border-slate-300 dark:border-slate-700">
+                      Performance Ratio
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
+                      {reportData.processQty}
+                    </td>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 font-medium">
+                      {reportData.idealQty}
+                    </td>
+                    <td className="py-3 px-4 border border-slate-300 dark:border-slate-700 bg-[#f8f9fa] dark:bg-slate-800 text-slate-900 dark:text-white font-semibold">
+                      {reportData.perfRatio}
+                    </td>
+                  </tr>
+
+                  {/* Spacer */}
+                  <tr><td colSpan={3} className="h-4"></td></tr>
+
+                  {/* Row 4: Final OEE */}
+                  <tr>
+                    <td colSpan={3} className="bg-[#0a1930] text-white font-bold text-lg py-3 px-4 border border-slate-300 dark:border-slate-700 tracking-wide uppercase">
+                      OEE %
+                    </td>
+                  </tr>
+                  <tr>
+                    <td colSpan={3} className="py-4 px-4 border border-slate-300 dark:border-slate-700 bg-[#f0f4f8] dark:bg-slate-800 text-[#0f172a] dark:text-white font-extrabold text-2xl">
+                      {reportData.oee}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+          </div>
+
+          {/* Chart Section */}
+          <div className={cardStyle}>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className={titleStyle} style={{marginBottom: 0}}>Daily OEE Trend</h2>
+              <div className="flex items-center gap-4">
+
+                <input
+                  type="month"
+                  value={chartMonth}
+                  onChange={e => setChartMonth(e.target.value)}
+                  className={inputStyle}
+                />
+              </div>
+            </div>
+
+            {trendData.length === 0 ? (
+              <div className="h-72 flex flex-col items-center justify-center text-slate-400 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-dashed border-slate-300 dark:border-slate-700">
+                <BarChart2 className="w-8 h-8 mb-2 opacity-50" />
+                <p>No production entries for {chartMonth}</p>
+              </div>
+            ) : (
+              <div className="h-80 w-full mt-4">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={trendData} margin={{ top: 20, right: 30, left: 0, bottom: 40 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#334155' : '#e2e8f0'} />
+                    <XAxis
+                      dataKey="date"
+                      axisLine={{ stroke: isDarkMode ? '#475569' : '#94a3b8' }}
+                      tickLine={false}
+                      tick={{ fontSize: 12, fill: isDarkMode ? '#94a3b8' : '#64748b' }}
+                      dy={10}
+                      angle={-45}
+                      textAnchor="end"
+                    />
+                    <YAxis
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fontSize: 12, fill: isDarkMode ? '#94a3b8' : '#64748b' }}
+                      domain={[0, 100]}
+                      tickFormatter={(v) => `${v}%`}
+                    />
+                    <RechartsTooltip
+                      contentStyle={{ backgroundColor: isDarkMode ? '#1e293b' : '#fff', borderRadius: '8px', border: `1px solid ${isDarkMode ? '#334155' : '#e2e8f0'}`, boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', color: isDarkMode ? '#f8fafc' : '#0f172a' }}
+                      cursor={{ fill: isDarkMode ? '#334155' : '#f1f5f9' }}
+                    />
+
+                    <ReferenceLine y={75} stroke="#dc2626" strokeWidth={2} label={{ position: 'insideTopRight', value: 'Target 75)', fill: '#dc2626', fontSize: 12 }} />
+
+                    <Bar dataKey="OEE" fill="#1f77b4" maxBarSize={50}>
+                       <LabelList dataKey="OEE" position="top" formatter={(val) => `${val}%`} style={{ fill: isDarkMode ? '#cbd5e1' : '#334155', fontSize: 11, fontWeight: 600 }} />
+                       {trendData.map((entry, index) => (
+                         <Cell key={`cell-${index}`} fill="#1f77b4" />
+                       ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showCustomReport && (
+        <CustomReportModal
+          machines={machines}
+          processes={processes}
+          defaultFrom={reportFrom}
+          defaultTo={reportTo}
+          onClose={() => setShowCustomReport(false)}
+        />
+      )}
+
+      {showQuickDownloadPicker && (
+        <ProcessPickerModal
+          processes={processes}
+          downloading={downloadingQuick}
+          onDownload={runQuickDownload}
+          onClose={() => setShowQuickDownloadPicker(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Quick Download popup: pick one or more processes, then download today's
+// PDF scoped to just their machines ─────────────────────────────────────
+const ProcessPickerModal = ({ processes, downloading, onDownload, onClose }) => {
+  const toast = useAlert() || toastify;
+  const [selected, setSelected] = useState([]);
+
+  const toggle = (id) => {
+    setSelected((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]));
+  };
+
+  const allSelected = processes.length > 0 && selected.length === processes.length;
+  const toggleAll = () => setSelected(allSelected ? [] : processes.map((p) => p._id));
+
+  const handleDownloadClick = () => {
+    if (selected.length === 0) {
+      toast.error?.("Select at least one process");
+      return;
+    }
+    onDownload(selected);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-sm bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+          <h2 className="text-base font-semibold text-slate-900 dark:text-white">Download PDF</h2>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-3">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Select one or more processes — today's PDF will include only their machines.
+          </p>
+
+          <div className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 max-h-64 overflow-y-auto space-y-1.5">
+            <label className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200 cursor-pointer select-none pb-1.5 mb-1 border-b border-slate-100 dark:border-slate-800">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleAll}
+                className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+              />
+              Select All
+            </label>
+            {processes.map((p) => (
+              <label key={p._id} className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(p._id)}
+                  onChange={() => toggle(p._id)}
+                  className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                />
+                {p.processName}
+              </label>
+            ))}
+            {processes.length === 0 && (
+              <p className="text-sm text-slate-400 py-2">No processes found.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-slate-800">
+          <button
+            onClick={onClose}
+            disabled={downloading}
+            className="rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-sm font-medium px-4 py-2.5 transition-colors disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleDownloadClick}
+            disabled={downloading}
+            className="inline-flex items-center gap-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-4 py-2.5 shadow-sm transition-colors disabled:opacity-70"
+          >
+            <Download className="w-4 h-4" />
+            {downloading ? "Downloading…" : "Download PDF"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Custom Report modal: date range + machine/process + column picker ──────
+const CustomReportModal = ({ machines, processes, defaultFrom, defaultTo, onClose }) => {
+  const toast = useAlert() || toastify;
+  const [from, setFrom] = useState(defaultFrom);
+  const [to, setTo] = useState(defaultTo);
+  const [machine, setMachine] = useState("all");
+  const [process, setProcess] = useState("all");
+
+  // Only show machines that belong to the selected process
+  const filteredMachines = useMemo(() => {
+    if (process === "all") return machines;
+    return machines.filter((m) =>
+      (m.processes || []).some((p) => (typeof p === "object" ? p._id : p) === process)
+    );
+  }, [machines, process]);
+
+  const handleProcessChange = (e) => {
+    setProcess(e.target.value);
+    setMachine("all");
+  };
+  const [selectedColumns, setSelectedColumns] = useState(REPORT_COLUMNS.map((c) => c.key));
+  const [downloading, setDownloading] = useState(false);
+
+  const toggleColumn = (key) => {
+    setSelectedColumns((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
+
+  const handleDownload = async () => {
+    if (selectedColumns.length === 0) {
+      toast.error?.("Select at least one column");
+      return;
+    }
+    setDownloading(true);
+    try {
+      const params = { from, to, columns: selectedColumns.join(",") };
+      if (machine !== "all") params.machine = machine;
+      if (process !== "all") params.process = process;
+      const res = await downloadOeeReport(params);
+      const filename = `OEE-Report_${from}${to !== from ? `_to_${to}` : ""}.pdf`;
+      triggerBlobDownload(res.data, filename);
+      onClose();
+    } catch (err) {
+      console.error("Failed to download custom report", err);
+      toast.error?.("Failed to download report");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const inputStyle = "w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500 dark:text-slate-200";
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-lg bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+          <h2 className="text-base font-semibold text-slate-900 dark:text-white">Custom Report</h2>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">From</label>
+              <DatePicker name="from" value={from} onChange={(e) => setFrom(e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">To</label>
+              <DatePicker name="to" value={to} onChange={(e) => setTo(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">Process</label>
+              <select value={process} onChange={handleProcessChange} className={inputStyle}>
+                <option value="all">All Processes</option>
+                {processes.map((p) => <option key={p._id} value={p._id}>{p.processName}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">Machine</label>
+              <select value={machine} onChange={(e) => setMachine(e.target.value)} className={inputStyle}>
+                <option value="all">All Machines</option>
+                {filteredMachines.map((m) => <option key={m._id} value={m._id}>{m.machineName}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1.5">Columns</label>
+            <div className="grid grid-cols-2 gap-y-1.5 gap-x-2 border border-slate-200 dark:border-slate-700 rounded-xl p-3">
+              {REPORT_COLUMNS.map((c) => (
+                <label key={c.key} className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={selectedColumns.includes(c.key)}
+                    onChange={() => toggleColumn(c.key)}
+                    className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                  />
+                  {c.label}
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-slate-800">
+          <button
+            onClick={onClose}
+            disabled={downloading}
+            className="rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-sm font-medium px-4 py-2.5 transition-colors disabled:opacity-60"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleDownload}
+            disabled={downloading}
+            className="inline-flex items-center gap-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-4 py-2.5 shadow-sm transition-colors disabled:opacity-70"
+          >
+            <Download className="w-4 h-4" />
+            {downloading ? "Downloading…" : "Download PDF"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};

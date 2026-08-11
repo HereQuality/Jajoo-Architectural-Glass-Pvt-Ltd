@@ -1,0 +1,79 @@
+"use strict";
+/**
+ * routes/index.js — API v1 Router (Root)
+ *
+ * All routes are prefixed with /api/v1 (set in app.js).
+ *
+ * Route structure:
+ *   POST   /api/v1/auth/register
+ *   POST   /api/v1/auth/login
+ *   POST   /api/v1/auth/logout
+ *   POST   /api/v1/auth/refresh-token
+ *   GET    /api/v1/auth/me
+ *   ...
+ *   GET    /api/v1/users         (admin)
+ *   GET    /api/v1/inventory     (protected)
+ *   ...
+ *
+ * Add new resource routes here as the app grows.
+ */
+
+const express = require("express");
+const router = express.Router();
+
+// ── Route modules (uncomment as you build them) ──────────────────────────────
+const authRoutes = require("./auth.routes");
+const menuRoutes = require("./menu.routes");
+const departmentRoutes = require("./department.routes");
+const roleRoutes = require("./role.routes");
+const companyRoutes = require("./company.routes");
+const employeeRolesRoutes = require("./employeeRoles.routes");
+const employeeRoutes = require("./employee.routes");
+const skillRoutes = require("./skill.routes");
+const teamRoutes = require("./team.routes");
+const ticketRoutes = require("./ticket.routes");
+const notificationRoutes = require("./notification.routes");
+const machineRoutes = require("./machine.routes");
+const processRoutes = require("./process.routes");
+const productionEntryRoutes = require("./productionEntry.routes");
+const operatorRoutes = require("./operator.routes");
+const standardTimeRoutes = require("./standardTime.routes");
+const reportRoutes = require("./report.routes");
+// const inventoryRoutes = require("./inventory.routes");
+
+// ── Mount routes ─────────────────────────────────────────────────────────────
+router.use("/auth", authRoutes);
+router.use("/", menuRoutes);
+router.use("/departments", departmentRoutes);
+router.use("/roles", roleRoutes);
+router.use("/companies", companyRoutes);
+router.use("/employee-roles", employeeRolesRoutes);
+router.use("/employees", employeeRoutes);
+router.use("/skills", skillRoutes);
+router.use("/teams", teamRoutes);
+router.use("/tickets", ticketRoutes);
+router.use("/notifications", notificationRoutes);
+router.use("/machines", machineRoutes);
+router.use("/processes", processRoutes);
+router.use("/production-entries", productionEntryRoutes);
+router.use("/operators", operatorRoutes);
+router.use("/standard-times", standardTimeRoutes);
+router.use("/reports", reportRoutes);
+// router.use("/inventory", inventoryRoutes);
+
+// ── API Info endpoint ─────────────────────────────────────────────────────────
+router.get("/", (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Internal_Audit API v1",
+    version: "1.0.0",
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      auth: "/api/v1/auth",
+      users: "/api/v1/users",
+      inventory: "/api/v1/inventory",
+    },
+  });
+});
+
+module.exports = router;
