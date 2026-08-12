@@ -164,7 +164,6 @@ const validate = (v) => {
   if (!v.sizeWidthMm) e.sizeWidthMm = "Width is required";
   if (!v.sizeHeightMm) e.sizeHeightMm = "Height is required";
   if (!v.thicknessMm) e.thicknessMm = "Thickness is required";
-  else if (isNaN(Number(v.thicknessMm)) || Number(v.thicknessMm) <= 0) e.thicknessMm = "Must be a number > 0";
   if (!v.standardTimePerPieceMin) e.standardTimePerPieceMin = "Standard Time is required";
   else if (isNaN(Number(v.standardTimePerPieceMin)) || Number(v.standardTimePerPieceMin) <= 0) e.standardTimePerPieceMin = "Must be a number > 0";
 
@@ -510,7 +509,6 @@ const GrindingEntry = () => {
   const [loadingSheet, setLoadingSheet] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [values, setValues] = useState(buildInit());
-  const [isManualThickness, setIsManualThickness] = useState(false);
   const [formErrors, setFormErrors] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -714,7 +712,6 @@ const GrindingEntry = () => {
 
   const handleSizeChange = (e) => {
     const val = e.target.value;
-    setIsManualThickness(false);
     if (!val) {
       setValues((prev) => ({ ...prev, sizeWidthMm: "", sizeHeightMm: "", thicknessMm: "", standardTimePerPieceMin: "" }));
       return;
@@ -723,35 +720,30 @@ const GrindingEntry = () => {
     setValues((prev) => ({ ...prev, sizeWidthMm: w, sizeHeightMm: h, thicknessMm: "", standardTimePerPieceMin: "" }));
   };
 
-  const MANUAL_THICKNESS_OPTION = "__manual__";
-
   const handleThicknessChange = (e) => {
-    const val = e.target.value;
-    if (val === MANUAL_THICKNESS_OPTION) {
-      setIsManualThickness(true);
-      setValues((prev) => ({ ...prev, thicknessMm: "", standardTimePerPieceMin: "" }));
-      return;
-    }
-    setValues((prev) => ({ ...prev, thicknessMm: val }));
+    setValues((prev) => ({ ...prev, thicknessMm: e.target.value }));
   };
 
   const uniqueThicknesses = useMemo(() => {
     if (!values.sizeWidthMm || !values.sizeHeightMm) return [];
-    return [...new Set(
+    const opts = new Set(
       stdTimes.filter(
         (s) => String(s.sizeWidthMm) === String(values.sizeWidthMm) &&
                String(s.sizeHeightMm) === String(values.sizeHeightMm)
       ).map((s) => s.thicknessMm)
-    )].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
-  }, [stdTimes, values.sizeWidthMm, values.sizeHeightMm]);
+    );
+    // Editing an older entry saved before manual thickness entry was removed
+    // may reference a thickness no longer in the master list — keep it
+    // selectable instead of silently dropping it from the dropdown.
+    if (editId && values.thicknessMm) opts.add(values.thicknessMm);
+    return [...opts].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+  }, [stdTimes, values.sizeWidthMm, values.sizeHeightMm, editId, values.thicknessMm]);
 
-  // Auto-fetch standard time when all three dimensions are selected. Skipped
-  // while typing a manual thickness so it doesn't stomp on a manually-typed
-  // Standard Time — it only re-engages if the typed thickness happens to
-  // match an existing master row.
+  // Auto-fetch standard time whenever all three dimensions are selected —
+  // Standard Time always comes from the Standard Time Master, never typed.
   useEffect(() => {
     if (!values.sizeWidthMm || !values.sizeHeightMm || !values.thicknessMm) {
-      if (!isManualThickness) setValues((prev) => ({ ...prev, standardTimePerPieceMin: "" }));
+      setValues((prev) => ({ ...prev, standardTimePerPieceMin: "" }));
       return;
     }
     const match = stdTimes.find(
@@ -760,25 +752,13 @@ const GrindingEntry = () => {
         String(s.sizeHeightMm) === String(values.sizeHeightMm) &&
         String(s.thicknessMm) === String(values.thicknessMm),
     );
-    if (match) setValues((prev) => ({ ...prev, standardTimePerPieceMin: String(match.standardTimeMin) }));
-    else if (!isManualThickness) setValues((prev) => ({ ...prev, standardTimePerPieceMin: "" }));
-  }, [values.sizeWidthMm, values.sizeHeightMm, values.thicknessMm, stdTimes, isManualThickness]);
-
-  // If an existing entry's thickness isn't among the master-data options for
-  // its size (e.g. it was saved via manual entry), switch the field into
-  // manual mode once those options load, instead of showing a blank select.
-  useEffect(() => {
-    if (!editId || !values.thicknessMm || uniqueThicknesses.length === 0) return;
-    if (!uniqueThicknesses.some((t) => String(t) === String(values.thicknessMm))) {
-      setIsManualThickness(true);
-    }
-  }, [editId, values.thicknessMm, uniqueThicknesses]);
+    setValues((prev) => ({ ...prev, standardTimePerPieceMin: match ? String(match.standardTimeMin) : "" }));
+  }, [values.sizeWidthMm, values.sizeHeightMm, values.thicknessMm, stdTimes]);
 
   const openModal = () => {
     const initMachine = activeMachine || "";
     setValues(buildInit(initMachine));
     setEditId(null);
-    setIsManualThickness(false);
     setFormErrors({});
     setSubmitted(false);
     setFormProcess("");
@@ -789,7 +769,6 @@ const GrindingEntry = () => {
   const openEdit = (e) => {
     setEditId(e._id);
     setFormProcess("");
-    setIsManualThickness(false);
     setValues({
       date: new Date(e.date).toISOString().split("T")[0],
       mcStartTime: e.mcStartTime || "",
@@ -837,7 +816,6 @@ const GrindingEntry = () => {
   const handleChange = (e) => {
     const { name, value } = e.target;
     if (name === "machine") {
-      setIsManualThickness(false);
       setValues((prev) => ({
         ...prev,
         machine: value,
@@ -1302,58 +1280,28 @@ const GrindingEntry = () => {
                   {/* Thickness */}
                   <div>
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Thickness (mm) <span className="text-red-500">*</span></label>
-                    {isManualThickness ? (
-                      <>
-                        <input
-                          type="number" name="thicknessMm" value={values.thicknessMm} onChange={handleChange}
-                          onWheel={(e) => e.target.blur()} ref={noWheelChange} min={0.01} step="any"
-                          placeholder="Enter thickness" className={cls(err("thicknessMm"))}
-                        />
-                        {uniqueThicknesses.length > 0 && (
-                          <button type="button" onClick={() => { setIsManualThickness(false); setValues((prev) => ({ ...prev, thicknessMm: "", standardTimePerPieceMin: "" })); }}
-                            className="text-[10px] text-blue-600 hover:underline mt-0.5">
-                            ← Pick from list instead
-                          </button>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        <select name="thicknessMm" value={values.thicknessMm} onChange={handleThicknessChange}
-                          disabled={!values.sizeWidthMm || !values.sizeHeightMm} className={cls(err("thicknessMm"))}>
-                          <option value="">{(!values.sizeWidthMm || !values.sizeHeightMm) ? "Select size first" : "Select Thickness"}</option>
-                          {uniqueThicknesses.map((t) => <option key={t} value={t}>{t} mm</option>)}
-                          {(values.sizeWidthMm && values.sizeHeightMm) && <option value={MANUAL_THICKNESS_OPTION}>＋ Enter manually…</option>}
-                        </select>
-                      </>
-                    )}
+                    <select name="thicknessMm" value={values.thicknessMm} onChange={handleThicknessChange}
+                      disabled={!values.sizeWidthMm || !values.sizeHeightMm} className={cls(err("thicknessMm"))}>
+                      <option value="">{(!values.sizeWidthMm || !values.sizeHeightMm) ? "Select size first" : "Select Thickness"}</option>
+                      {uniqueThicknesses.map((t) => <option key={t} value={t}>{t} mm</option>)}
+                    </select>
                     {err("thicknessMm") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("thicknessMm")}</p>}
                   </div>
 
-                  {/* Standard Time — auto-filled from master data, or manually
-                      typed once thickness is entered manually and no match is found */}
+                  {/* Standard Time — always auto-filled from Standard Time Master */}
                   <div className="sm:col-span-2">
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
                       Standard Time of Grinding One Glass (min)
-                      {isManualThickness
-                        ? <span className="ml-1 text-[10px] text-amber-600 font-normal">(enter manually — not in master data)</span>
-                        : <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-filled)</span>}
+                      <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-filled)</span>
                     </label>
-                    {isManualThickness ? (
-                      <input
-                        type="number" name="standardTimePerPieceMin" value={values.standardTimePerPieceMin} onChange={handleChange}
-                        onWheel={(e) => e.target.blur()} ref={noWheelChange} min={0.01} step="any"
-                        placeholder="Enter standard time (min)" className={cls(err("standardTimePerPieceMin"))}
-                      />
-                    ) : (
-                      <input
-                        type="text"
-                        readOnly
-                        value={values.standardTimePerPieceMin ? `${values.standardTimePerPieceMin} min` : "—"}
-                        className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default"
-                      />
-                    )}
+                    <input
+                      type="text"
+                      readOnly
+                      value={values.standardTimePerPieceMin ? `${values.standardTimePerPieceMin} min` : "—"}
+                      className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default"
+                    />
                     {err("standardTimePerPieceMin") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("standardTimePerPieceMin")}</p>}
-                    {(!isManualThickness && values.machine && values.sizeWidthMm && values.sizeHeightMm && values.thicknessMm && !values.standardTimePerPieceMin) && <p className="text-[10px] text-amber-600 mt-0.5 leading-tight">No standard time found for this combination.</p>}
+                    {(values.machine && values.sizeWidthMm && values.sizeHeightMm && values.thicknessMm && !values.standardTimePerPieceMin) && <p className="text-[10px] text-amber-600 mt-0.5 leading-tight">No standard time found for this combination.</p>}
                   </div>
 
                 </div>

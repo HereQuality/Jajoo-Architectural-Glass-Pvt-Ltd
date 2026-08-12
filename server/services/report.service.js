@@ -148,8 +148,10 @@ function drawEfficiencyCard(doc, { x, y, width, machineLabel, agg }) {
   const spacer = 8;
   let curY = y;
 
-  doc.font("Helvetica-Bold").fontSize(12).fillColor("#0a1930").text(machineLabel, x, curY, { width });
-  curY += 20;
+  if (machineLabel) {
+    doc.font("Helvetica-Bold").fontSize(12).fillColor("#0a1930").text(machineLabel, x, curY, { width });
+    curY += 20;
+  }
 
   const rows = [
     [
@@ -227,11 +229,27 @@ function drawProcessTotalCard(doc, { x, y, width, processName, agg }) {
   });
 }
 
+// Same shape as drawProcessTotalCard but for the report-wide grand total
+// (every machine across every process, counted once each) — a distinct
+// accent color so it reads as "the one number that matters most" above
+// the per-process/per-machine detail below it.
+function drawOverallTotalCard(doc, { x, y, width, agg }) {
+  doc.rect(x, y, TOTAL_ACCENT_WIDTH, CARD_HEIGHT).fill("#059669");
+  return drawEfficiencyCard(doc, {
+    x: x + TOTAL_ACCENT_WIDTH + 8,
+    y,
+    width: width - TOTAL_ACCENT_WIDTH - 8,
+    machineLabel: "All Machines — Grand Total",
+    agg,
+  });
+}
+
 /**
  * @param grouped [{ processName, total, machines: [{ machineName, agg }] }]
+ * @param overall aggregateOee() result across every unique machine (counted once each)
  * @returns {PDFDocument} a readable PDFKit stream — caller pipes it to the response.
  */
-function buildOeeDashboardPdf({ grouped, from, to }) {
+function buildOeeDashboardPdf({ grouped, overall, from, to }) {
   const doc = new PDFDocument({ margin: 30, size: "A4" });
   const x = 30;
   const width = doc.page.width - 60;
@@ -251,6 +269,11 @@ function buildOeeDashboardPdf({ grouped, from, to }) {
   }
 
   let curY = doc.y;
+
+  if (overall) {
+    curY = drawOverallTotalCard(doc, { x, y: curY, width, agg: overall });
+    curY += cardGap + groupGap;
+  }
   grouped.forEach(({ processName, total, machines }) => {
     // Keep the process header glued to at least its total card.
     if (curY + GROUP_HEADER_HEIGHT + CARD_HEIGHT > doc.page.height - doc.page.margins.bottom) {
@@ -286,4 +309,128 @@ function buildOeeDashboardPdf({ grouped, from, to }) {
   return doc;
 }
 
-module.exports = { buildOeeReportPdf, buildOeeDashboardPdf, ALL_COLUMNS };
+// ── Daily OEE Trend chart PDF — mirrors the Dashboard's on-screen Recharts
+// bar chart (blue bars, % labels on top, dashed gridlines, red Target 75%
+// reference line, rotated date labels) so the download looks like the chart
+// the user is looking at. Drawn with PDFKit vector primitives (no headless
+// browser/canvas dependency) since every other report in this file already
+// works that way. ───────────────────────────────────────────────────────
+function drawBarChart(doc, { x, y, width, height, data, target, color = "#1f77b4" }) {
+  const gridColor = "#e2e8f0";
+  const axisColor = "#94a3b8";
+  const textColor = "#64748b";
+
+  const chartX = x + 34; // room for y-axis % labels
+  const chartWidth = width - 34;
+  const chartBottom = y + height;
+  const maxVal = 100;
+
+  // Y-axis gridlines + labels at 0/25/50/75/100%
+  doc.font("Helvetica").fontSize(9);
+  [0, 25, 50, 75, 100].forEach((tick) => {
+    const ty = chartBottom - (tick / maxVal) * height;
+    doc.strokeColor(gridColor).lineWidth(0.5)
+      .moveTo(chartX, ty).lineTo(chartX + chartWidth, ty).dash(3, { space: 2 }).stroke().undash();
+    doc.fillColor(textColor).text(`${tick}%`, x, ty - 4, { width: 30, align: "right" });
+  });
+
+  // X-axis baseline
+  doc.strokeColor(axisColor).lineWidth(1).moveTo(chartX, chartBottom).lineTo(chartX + chartWidth, chartBottom).stroke();
+
+  // Target reference line
+  if (target != null) {
+    const targetY = chartBottom - (target / maxVal) * height;
+    doc.strokeColor("#dc2626").lineWidth(1.5)
+      .moveTo(chartX, targetY).lineTo(chartX + chartWidth, targetY).dash(4, { space: 2 }).stroke().undash();
+    doc.fillColor("#dc2626").font("Helvetica-Bold").fontSize(8)
+      .text(`Target ${target}%`, chartX + chartWidth - 70, targetY - 12, { width: 70, align: "right" });
+  }
+
+  // Bars
+  const n = data.length || 1;
+  const slotWidth = chartWidth / n;
+  const barWidth = Math.min(36, slotWidth * 0.55);
+
+  data.forEach((d, i) => {
+    const val = Number(d.OEE) || 0;
+    const barHeight = (Math.min(val, maxVal) / maxVal) * height;
+    const barX = chartX + i * slotWidth + (slotWidth - barWidth) / 2;
+    const barY = chartBottom - barHeight;
+
+    doc.fillColor(color).rect(barX, barY, barWidth, barHeight).fill();
+
+    doc.fillColor("#334155").font("Helvetica-Bold").fontSize(7)
+      .text(`${val}%`, barX - 10, barY - 11, { width: barWidth + 20, align: "center" });
+
+    // Rotated date label under the bar, matching the on-screen -45° x-axis.
+    const labelX = barX + barWidth / 2;
+    doc.save();
+    doc.rotate(-45, { origin: [labelX, chartBottom + 4] });
+    doc.fillColor(textColor).font("Helvetica").fontSize(7.5)
+      .text(d.date, labelX - 60, chartBottom + 4, { width: 60, align: "right" });
+    doc.restore();
+  });
+
+  doc.y = chartBottom + 45;
+}
+
+/**
+ * @param data [{ date, OEE }] — already-aggregated per-day OEE%, exactly as
+ * shown in the Dashboard's Daily OEE Trend chart for the selected month.
+ * @returns {PDFDocument} a readable PDFKit stream — caller pipes it to the response.
+ */
+function buildDailyOeeTrendPdf({ data, month, target = 75, filterDescription }) {
+  const doc = new PDFDocument({ margin: 30, size: "A4" });
+
+  doc.fontSize(16).font("Helvetica-Bold").fillColor("#0a1930").text("Daily OEE Trend");
+  doc.moveDown(0.3);
+  doc.fontSize(10).font("Helvetica").fillColor("#334155").text(`Month: ${month}`);
+  if (filterDescription) {
+    doc.fontSize(9).fillColor("#64748b").text(filterDescription);
+  }
+  doc.moveDown(0.8);
+
+  if (!data || data.length === 0) {
+    doc.fontSize(11).fillColor("#64748b").text("No production entries for this month.");
+    return doc;
+  }
+
+  drawBarChart(doc, {
+    x: 30,
+    y: doc.y,
+    width: doc.page.width - 60,
+    height: 300,
+    data,
+    target,
+  });
+
+  return doc;
+}
+
+// ── Quick "Download PDF" on the Dashboard's Efficiency Report card — draws
+// the exact same single card (same 3-column stat grid + big OEE% footer)
+// the user is already looking at, for whatever From/To range and
+// Process/Machine filter is currently active on screen. Reuses
+// drawEfficiencyCard so this can never visually drift from the per-machine
+// cards in buildOeeDashboardPdf above.
+function buildEfficiencyCardPdf({ agg, from, to, filterDescription }) {
+  const doc = new PDFDocument({ margin: 30, size: "A4" });
+
+  doc.fontSize(16).font("Helvetica-Bold").fillColor("#0a1930").text("Efficiency Report (OEE)");
+  doc.moveDown(0.3);
+  doc.fontSize(10).font("Helvetica").fillColor("#334155").text(filterDescription);
+  doc.fontSize(9).fillColor("#64748b").text(from === to ? `Date: ${from}` : `Date Range: ${from} to ${to}`);
+  doc.moveDown(0.8);
+
+  drawEfficiencyCard(doc, {
+    x: 30,
+    y: doc.y,
+    width: doc.page.width - 60,
+    machineLabel: null,
+    agg,
+  });
+
+  return doc;
+}
+
+module.exports = { buildOeeReportPdf, buildOeeDashboardPdf, buildDailyOeeTrendPdf, buildEfficiencyCardPdf, ALL_COLUMNS };

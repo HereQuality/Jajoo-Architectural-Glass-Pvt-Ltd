@@ -60,6 +60,11 @@ function shiftDuration(startTime, offTime) {
 function computeCalculations(entry) {
   const num = (v) => Number(v) || 0;
   const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+  // Ratio fields (0–1) are displayed as a percentage with 2 decimal places
+  // (e.g. 93.79%) — round2 on the raw 0–1 ratio only keeps whole-percent
+  // precision (0.94 → always "94.00%"), so these need 4 decimal places on
+  // the ratio itself to preserve 2 decimal places once ×100.
+  const round4 = (n) => Math.round((n + Number.EPSILON) * 10000) / 10000;
 
   // 1. Shift Duration = M/C Off Time − M/C Start Time
   const shiftDurationMin = shiftDuration(entry.mcStartTime, entry.mcOffTime);
@@ -113,9 +118,9 @@ function computeCalculations(entry) {
     idealProductionQty:   idealProductionQty === null ? null : round2(idealProductionQty),
     effectiveMcRunTimeMin:round2(effectiveMcRunTimeMin),
     unreportedTimeMin:    unreportedTimeMin === null ? null : round2(unreportedTimeMin),
-    availabilityRatio:    availabilityRatio === null ? null : round2(availabilityRatio),
-    performanceRatio:     performanceRatio === null ? null : round2(performanceRatio),
-    qualityRatio:         round2(qualityRatio),
+    availabilityRatio:    availabilityRatio === null ? null : round4(availabilityRatio),
+    performanceRatio:     performanceRatio === null ? null : round4(performanceRatio),
+    qualityRatio:         round4(qualityRatio),
     oeePercent:           oeePercent === null ? null : round2(oeePercent),
   };
 }

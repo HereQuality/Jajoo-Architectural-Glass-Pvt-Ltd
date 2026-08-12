@@ -4,7 +4,7 @@ import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { ThemeContext } from "../context/ThemeContext";
 import { listProductionEntries } from "../api/productionEntries.api";
-import { downloadOeeReport, downloadDashboardOeeReport } from "../api/reports.api";
+import { downloadOeeReport, downloadDailyOeeTrendReport, downloadDashboardOeeReport } from "../api/reports.api";
 import { useMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import DatePicker from "../Components/Common/DatePicker";
@@ -46,8 +46,8 @@ export default function Dashboard() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [downloadingQuick, setDownloadingQuick] = useState(false);
+  const [downloadingTrend, setDownloadingTrend] = useState(false);
   const [showCustomReport, setShowCustomReport] = useState(false);
-  const [showQuickDownloadPicker, setShowQuickDownloadPicker] = useState(false);
 
   // Filters
   const [selectedMachine, setSelectedMachine] = useState("all");
@@ -67,10 +67,11 @@ export default function Dashboard() {
   };
 
   // Date filter for chart (Month-Year)
-    const [chartMonth, setChartMonth] = useState(() => {
+  const currentMonthStr = () => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  });
+  };
+  const [chartMonth, setChartMonth] = useState(currentMonthStr);
 
   // Date range filter for Efficiency Report
   const todayStr = () => {
@@ -80,19 +81,50 @@ export default function Dashboard() {
   const [reportFrom, setReportFrom] = useState(todayStr);
   const [reportTo, setReportTo] = useState(todayStr);
 
+  const isReportRangeDefault = reportFrom === todayStr() && reportTo === todayStr();
+  const isChartMonthDefault = chartMonth === currentMonthStr();
+  const isAnyFilterActive =
+    selectedProcess !== "all" || selectedMachine !== "all" || !isReportRangeDefault || !isChartMonthDefault;
+
+  // Clears every filter on the page — Process/Machine, the Efficiency
+  // Report's From/To range, and the chart's month — back to defaults.
+  const clearAllFilters = () => {
+    setSelectedProcess("all");
+    setSelectedMachine("all");
+    setReportFrom(todayStr());
+    setReportTo(todayStr());
+    setChartMonth(currentMonthStr());
+  };
+
   useEffect(() => {
     fetchData();
   }, [selectedMachine, selectedProcess]); // Fetch monthly data
 
+  // Pages through the full result set for the current Process/Machine
+  // filter instead of capping at one page — a fixed per_page cap here
+  // would silently drop older entries from the on-screen stat cards/chart
+  // once a filter's total exceeds it, while the PDF downloads (which query
+  // the DB directly with no limit) would still include everything, so the
+  // two would quietly disagree.
   const fetchData = async () => {
     setLoading(true);
     try {
-      let query = { per_page: 2000 };
-      if (selectedMachine !== "all") query.machine = selectedMachine;
-      if (selectedProcess !== "all") query.process = selectedProcess;
+      const baseQuery = {};
+      if (selectedMachine !== "all") baseQuery.machine = selectedMachine;
+      if (selectedProcess !== "all") baseQuery.process = selectedProcess;
 
-      const res = await listProductionEntries(query);
-      setEntries(res.data?.data || []);
+      const PAGE_SIZE = 2000;
+      let all = [];
+      let skip = 0;
+      for (;;) {
+        const res = await listProductionEntries({ ...baseQuery, skip, per_page: PAGE_SIZE });
+        const page = res.data?.data || [];
+        all = all.concat(page);
+        const total = res.data?.count ?? all.length;
+        skip += PAGE_SIZE;
+        if (page.length === 0 || all.length >= total) break;
+      }
+      setEntries(all);
     } catch (err) {
       console.error("Failed to fetch dashboard data", err);
     } finally {
@@ -100,16 +132,18 @@ export default function Dashboard() {
     }
   };
 
-  // Uses the same From/To range shown in the Efficiency Report card above,
-  // so the PDF always matches what's on screen. Which process(es) to
-  // include is picked in the popup right before this runs.
-  const runQuickDownload = async (processIds) => {
+  // Downloads a full breakdown for the From/To range only — every active
+  // machine under every active process, each with its own card (zero-filled
+  // if it has no entries that range), not just the single combined "All
+  // Machines" total. Deliberately ignores the Process/Machine dropdown
+  // filters at the top of the page — those narrow what's shown on screen,
+  // but the PDF is meant to always be the complete picture for the dates.
+  const runQuickDownload = async () => {
     setDownloadingQuick(true);
     try {
-      const res = await downloadDashboardOeeReport({ from: reportFrom, to: reportTo, processes: processIds.join(",") });
+      const res = await downloadDashboardOeeReport({ from: reportFrom, to: reportTo });
       const suffix = reportFrom === reportTo ? reportFrom : `${reportFrom}_to_${reportTo}`;
       triggerBlobDownload(res.data, `OEE-Report_${suffix}.pdf`);
-      setShowQuickDownloadPicker(false);
     } catch (err) {
       console.error("Failed to download report", err);
       toast.error?.("Failed to download report");
@@ -185,6 +219,30 @@ export default function Dashboard() {
     };
   }, [entries, reportFrom, reportTo]);
 
+  // Downloads the currently-displayed Daily OEE Trend chart (the month
+  // picked above it) as a PDF that looks like the on-screen chart — sends
+  // the already-computed { date, OEE } series so the PDF always matches
+  // whatever process/machine filter is active on screen.
+  const downloadTrendPdf = async () => {
+    setDownloadingTrend(true);
+    try {
+      const processName = selectedProcess === "all" ? "All Processes" : (processes.find((p) => p._id === selectedProcess)?.processName || "Unknown Process");
+      const machineName = selectedMachine === "all" ? "All Machines" : (machines.find((m) => m._id === selectedMachine)?.machineName || "Unknown Machine");
+      const res = await downloadDailyOeeTrendReport({
+        month: chartMonth,
+        target: 75,
+        filterDescription: `Process: ${processName}   ·   Machine: ${machineName}`,
+        data: trendData,
+      });
+      triggerBlobDownload(res.data, `Daily-OEE-Trend_${chartMonth}.pdf`);
+    } catch (err) {
+      console.error("Failed to download Daily OEE Trend PDF", err);
+      toast.error?.("Failed to download report");
+    } finally {
+      setDownloadingTrend(false);
+    }
+  };
+
   const cardStyle = "bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm p-5";
   const titleStyle = "text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-4";
   const inputStyle = "bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500 dark:text-slate-200";
@@ -201,11 +259,11 @@ export default function Dashboard() {
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">OEE Analytics & Efficiency Reports</p>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <select
             value={selectedProcess}
             onChange={handleProcessChange}
-            className={inputStyle}
+            className={`w-full sm:w-auto ${inputStyle}`}
           >
             <option value="all">All Processes</option>
             {processes.map(p => <option key={p._id} value={p._id}>{p.processName}</option>)}
@@ -213,11 +271,20 @@ export default function Dashboard() {
           <select
             value={selectedMachine}
             onChange={e => setSelectedMachine(e.target.value)}
-            className={inputStyle}
+            className={`w-full sm:w-auto ${inputStyle}`}
           >
             <option value="all">All Machines</option>
             {filteredMachines.map(m => <option key={m._id} value={m._id}>{m.machineName}</option>)}
           </select>
+          <button
+            onClick={clearAllFilters}
+            disabled={!isAnyFilterActive}
+            title="Clear every filter on this page — Process, Machine, date range, and chart month"
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-medium px-3 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-full sm:w-auto"
+          >
+            <X className="w-4 h-4" />
+            Clear Filter
+          </button>
         </div>
       </div>
 
@@ -249,9 +316,9 @@ export default function Dashboard() {
                   />
                 </div>
                 <button
-                  onClick={() => setShowQuickDownloadPicker(true)}
+                  onClick={runQuickDownload}
                   disabled={downloadingQuick}
-                  title="Pick one or more processes, then download the PDF (for the From/To range above) for just their machines"
+                  title="Download a PDF with every machine's Efficiency Report for the From/To range above (all machines, zero-filled if no entries — ignores the Process/Machine filters at the top of the page)"
                   className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors disabled:opacity-60"
                 >
                   <Download className="w-4 h-4" />
@@ -309,7 +376,7 @@ export default function Dashboard() {
           <div className={cardStyle}>
             <div className="flex items-center justify-between mb-4">
               <h2 className={titleStyle} style={{marginBottom: 0}}>Daily OEE Trend</h2>
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-3">
 
                 <input
                   type="month"
@@ -317,6 +384,15 @@ export default function Dashboard() {
                   onChange={e => setChartMonth(e.target.value)}
                   className={inputStyle}
                 />
+                <button
+                  onClick={downloadTrendPdf}
+                  disabled={trendData.length === 0 || downloadingTrend}
+                  title="Download this month's Daily OEE Trend as a PDF"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download className="w-4 h-4" />
+                  {downloadingTrend ? "Downloading…" : "Download"}
+                </button>
               </div>
             </div>
 
@@ -376,104 +452,9 @@ export default function Dashboard() {
           onClose={() => setShowCustomReport(false)}
         />
       )}
-
-      {showQuickDownloadPicker && (
-        <ProcessPickerModal
-          processes={processes}
-          downloading={downloadingQuick}
-          onDownload={runQuickDownload}
-          onClose={() => setShowQuickDownloadPicker(false)}
-        />
-      )}
     </div>
   );
 }
-
-// ── Quick Download popup: pick one or more processes, then download today's
-// PDF scoped to just their machines ─────────────────────────────────────
-const ProcessPickerModal = ({ processes, downloading, onDownload, onClose }) => {
-  const toast = useAlert() || toastify;
-  const [selected, setSelected] = useState([]);
-
-  const toggle = (id) => {
-    setSelected((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]));
-  };
-
-  const allSelected = processes.length > 0 && selected.length === processes.length;
-  const toggleAll = () => setSelected(allSelected ? [] : processes.map((p) => p._id));
-
-  const handleDownloadClick = () => {
-    if (selected.length === 0) {
-      toast.error?.("Select at least one process");
-      return;
-    }
-    onDownload(selected);
-  };
-
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-sm bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
-          <h2 className="text-base font-semibold text-slate-900 dark:text-white">Download PDF</h2>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="p-6 space-y-3">
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            Select one or more processes — today's PDF will include only their machines.
-          </p>
-
-          <div className="border border-slate-200 dark:border-slate-700 rounded-xl p-3 max-h-64 overflow-y-auto space-y-1.5">
-            <label className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200 cursor-pointer select-none pb-1.5 mb-1 border-b border-slate-100 dark:border-slate-800">
-              <input
-                type="checkbox"
-                checked={allSelected}
-                onChange={toggleAll}
-                className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-              />
-              Select All
-            </label>
-            {processes.map((p) => (
-              <label key={p._id} className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(p._id)}
-                  onChange={() => toggle(p._id)}
-                  className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-                />
-                {p.processName}
-              </label>
-            ))}
-            {processes.length === 0 && (
-              <p className="text-sm text-slate-400 py-2">No processes found.</p>
-            )}
-          </div>
-        </div>
-
-        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-slate-800">
-          <button
-            onClick={onClose}
-            disabled={downloading}
-            className="rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 text-slate-700 dark:text-slate-200 text-sm font-medium px-4 py-2.5 transition-colors disabled:opacity-60"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleDownloadClick}
-            disabled={downloading}
-            className="inline-flex items-center gap-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-4 py-2.5 shadow-sm transition-colors disabled:opacity-70"
-          >
-            <Download className="w-4 h-4" />
-            {downloading ? "Downloading…" : "Download PDF"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
 
 // ── Custom Report modal: date range + machine/process + column picker ──────
 const CustomReportModal = ({ machines, processes, defaultFrom, defaultTo, onClose }) => {

@@ -57,6 +57,8 @@ export const ENDPOINTS = {
     REPORTS: {
         OEE: `${V1}/reports/oee`,
         OEE_DASHBOARD: `${V1}/reports/oee/dashboard`,
+        OEE_TREND: `${V1}/reports/oee/trend`,
+        OEE_CARD: `${V1}/reports/oee/card`,
     },
 
     // Production Data Entry endpoints

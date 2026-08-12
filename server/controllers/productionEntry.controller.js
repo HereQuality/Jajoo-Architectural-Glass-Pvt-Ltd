@@ -5,7 +5,7 @@ const { resolveMachineFilter } = require("../utils/entryQuery");
 const { aggregateEfficiencyByGroup } = require("../utils/efficiencyAggregate");
 
 const NUMERIC_FIELDS = [
-  "sizeWidthMm", "sizeHeightMm", "thicknessMm",
+  "sizeWidthMm", "sizeHeightMm",
   "processQty", "okQty",
   "standardTimePerPieceMin",
   "plannedDowntimeMin", "overtimeMin",
@@ -42,12 +42,15 @@ async function validatePayload(body) {
   else if (!errors.mcStartTime && body.mcStartTime === body.mcOffTime)
     errors.mcOffTime = "Off Time cannot equal Start Time";
 
-  const dims = { sizeWidthMm: "Width", sizeHeightMm: "Height", thicknessMm: "Thickness" };
+  const dims = { sizeWidthMm: "Width", sizeHeightMm: "Height" };
   for (const [k, label] of Object.entries(dims)) {
     const v = Number(body[k]);
     if (!body[k]) errors[k] = `${label} is required`;
     else if (isNaN(v) || v <= 0) errors[k] = `${label} must be > 0`;
   }
+
+  const thickness = typeof body.thicknessMm === "string" ? body.thicknessMm.trim() : body.thicknessMm;
+  if (!thickness && thickness !== 0) errors.thicknessMm = "Thickness is required";
 
   const qty = { processQty: "Process Qty", okQty: "OK Qty" };
   for (const [k, label] of Object.entries(qty)) {
@@ -93,6 +96,9 @@ function buildData(body) {
   };
   for (const k of NUMERIC_FIELDS) {
     if (body[k] !== undefined && body[k] !== "") data[k] = Number(body[k]);
+  }
+  if (body.thicknessMm !== undefined && body.thicknessMm !== "") {
+    data.thicknessMm = String(body.thicknessMm).trim();
   }
   // Rejected Qty is never entered manually — always derived server-side so
   // it can never drift from Process Qty / OK Qty (and is never missing).

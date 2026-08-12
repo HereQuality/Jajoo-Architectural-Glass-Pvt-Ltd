@@ -56,9 +56,9 @@ const ProductionEntrySchema = new mongoose.Schema(
       min: [0.1, "Height must be > 0"],
     },
     thicknessMm: {
-      type: Number,
+      type: String,
       required: [true, "Thickness is required"],
-      min: [0.1, "Thickness must be > 0"],
+      trim: true,
     },
 
     // ── Output quantities ─────────────────────
