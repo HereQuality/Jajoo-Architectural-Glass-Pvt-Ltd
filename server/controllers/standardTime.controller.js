@@ -27,11 +27,9 @@ async function validatePayload(body, excludeId = null) {
     errors.sizeHeightMm = "Height must be greater than 0";
   }
 
-  const t = Number(body.thicknessMm);
-  if (!body.thicknessMm && body.thicknessMm !== 0) {
+  const thickness = typeof body.thicknessMm === "string" ? body.thicknessMm.trim() : body.thicknessMm;
+  if (!thickness && thickness !== 0) {
     errors.thicknessMm = "Thickness (mm) is required";
-  } else if (isNaN(t) || t <= 0) {
-    errors.thicknessMm = "Thickness must be greater than 0";
   }
 
   const st = Number(body.standardTimeMin);
@@ -39,6 +37,23 @@ async function validatePayload(body, excludeId = null) {
     errors.standardTimeMin = "Standard Time is required";
   } else if (isNaN(st) || st <= 0) {
     errors.standardTimeMin = "Standard Time must be greater than 0";
+  }
+
+  // Machine + Size + Thickness must be unique — check explicitly so the
+  // error can be attached to a field instead of surfacing only as a
+  // generic 11000 duplicate-key error after the insert/update is attempted.
+  if (!errors.machine && !errors.sizeWidthMm && !errors.sizeHeightMm && !errors.thicknessMm) {
+    const dupQuery = {
+      machine: body.machine,
+      sizeWidthMm: w,
+      sizeHeightMm: h,
+      thicknessMm: String(thickness),
+    };
+    if (excludeId) dupQuery._id = { $ne: excludeId };
+    const dup = await StandardTime.findOne(dupQuery);
+    if (dup) {
+      errors.thicknessMm = "An entry already exists for this machine, size and thickness combination";
+    }
   }
 
   return errors;
@@ -56,7 +71,7 @@ exports.createStandardTime = async (req, res) => {
       machine: req.body.machine,
       sizeWidthMm: Number(req.body.sizeWidthMm),
       sizeHeightMm: Number(req.body.sizeHeightMm),
-      thicknessMm: Number(req.body.thicknessMm),
+      thicknessMm: String(req.body.thicknessMm).trim(),
       standardTimeMin: Number(req.body.standardTimeMin),
       isActive: req.body.isActive !== undefined ? req.body.isActive : true,
     });
@@ -91,7 +106,7 @@ exports.updateStandardTime = async (req, res) => {
         machine: req.body.machine,
         sizeWidthMm: Number(req.body.sizeWidthMm),
         sizeHeightMm: Number(req.body.sizeHeightMm),
-        thicknessMm: Number(req.body.thicknessMm),
+        thicknessMm: String(req.body.thicknessMm).trim(),
         standardTimeMin: Number(req.body.standardTimeMin),
         isActive: req.body.isActive,
       },

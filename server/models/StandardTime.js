@@ -25,9 +25,9 @@ const StandardTimeSchema = new mongoose.Schema(
       min: [0.1, "Height must be greater than 0"],
     },
     thicknessMm: {
-      type: Number,
+      type: String,
       required: [true, "Thickness (mm) is required"],
-      min: [0.1, "Thickness must be greater than 0"],
+      trim: true,
     },
     standardTimeMin: {
       type: Number,

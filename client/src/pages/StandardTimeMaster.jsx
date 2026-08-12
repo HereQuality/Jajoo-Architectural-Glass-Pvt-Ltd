@@ -17,6 +17,14 @@ import {
 
 const PAGE_SIZE = 20;
 
+// React attaches wheel listeners as passive by default, so preventDefault()
+// from a plain onWheel prop is silently ignored — the browser still lets
+// mouse-wheel/trackpad scroll bump a focused number input's value. Attaching
+// a real (non-passive) DOM listener via ref is the only way to block it.
+const noWheelChange = (el) => {
+  if (el) el.addEventListener("wheel", (e) => e.preventDefault(), { passive: false });
+};
+
 // ── Validation ────────────────────────────────────────────────────────────
 const validate = (v) => {
   const e = {};
@@ -27,9 +35,7 @@ const validate = (v) => {
   const h = Number(v.sizeHeightMm);
   if (!v.sizeHeightMm) e.sizeHeightMm = "Height is required";
   else if (isNaN(h) || h <= 0) e.sizeHeightMm = "Must be > 0";
-  const t = Number(v.thicknessMm);
-  if (!v.thicknessMm) e.thicknessMm = "Thickness is required";
-  else if (isNaN(t) || t <= 0) e.thicknessMm = "Must be > 0";
+  if (!String(v.thicknessMm || "").trim()) e.thicknessMm = "Thickness is required";
   const st = Number(v.standardTimeMin);
   if (!v.standardTimeMin) e.standardTimeMin = "Standard Time is required";
   else if (isNaN(st) || st <= 0) e.standardTimeMin = "Must be > 0";
@@ -69,9 +75,52 @@ const STModal = ({ mode, initialValues, machines, processes, onClose, onSaved })
     set("machine", "");
   };
 
+  // Live duplicate check — once Machine + Size + Thickness are all filled,
+  // look for another record already using that exact combination and, if
+  // found, lock the Standard Time field so a duplicate can't be typed at
+  // all (this mirrors the machine+size+thickness uniqueness enforced on
+  // the backend, just surfaced earlier in the flow).
+  const [dupCheck, setDupCheck] = useState({ checking: false, duplicate: false });
+  useEffect(() => {
+    const { machine, sizeWidthMm, sizeHeightMm, thicknessMm } = v;
+    if (!machine || !sizeWidthMm || !sizeHeightMm || !String(thicknessMm || "").trim()) {
+      setDupCheck({ checking: false, duplicate: false });
+      return;
+    }
+    let cancelled = false;
+    setDupCheck((prev) => ({ ...prev, checking: true }));
+    const timer = setTimeout(() => {
+      searchStandardTimes({ skip: 0, per_page: 500, machine })
+        .then((res) => {
+          if (cancelled) return;
+          const rows = res.data?.data?.[0]?.data || [];
+          const match = rows.find(
+            (r) =>
+              r._id !== initialValues._id &&
+              String(r.sizeWidthMm) === String(sizeWidthMm) &&
+              String(r.sizeHeightMm) === String(sizeHeightMm) &&
+              String(r.thicknessMm).trim().toLowerCase() === String(thicknessMm).trim().toLowerCase(),
+          );
+          setDupCheck({ checking: false, duplicate: !!match });
+        })
+        .catch(() => { if (!cancelled) setDupCheck({ checking: false, duplicate: false }); });
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [v.machine, v.sizeWidthMm, v.sizeHeightMm, v.thicknessMm, initialValues._id]);
+
+  useEffect(() => {
+    if (dupCheck.duplicate) {
+      set("standardTimeMin", "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dupCheck.duplicate]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     const errors = validate(v);
+    if (dupCheck.duplicate) {
+      errors.thicknessMm = "An entry already exists for this machine, size and thickness combination";
+    }
     setErrs(errors);
     setSubmitted(true);
     if (Object.keys(errors).length > 0) return;
@@ -163,6 +212,8 @@ const STModal = ({ mode, initialValues, machines, processes, onClose, onSaved })
                 placeholder="Width"
                 value={v.sizeWidthMm}
                 onChange={(e) => set("sizeWidthMm", e.target.value)}
+                onWheel={(e) => e.target.blur()}
+                ref={noWheelChange}
                 className={`w-full border rounded-xl px-3.5 py-2.5 text-sm outline-none transition-shadow ${
                   submitted && errs.sizeWidthMm ? "border-red-400 focus:border-red-500 focus:ring-4 focus:ring-red-500/15" : "border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
                 }`}
@@ -175,6 +226,8 @@ const STModal = ({ mode, initialValues, machines, processes, onClose, onSaved })
                 placeholder="Height"
                 value={v.sizeHeightMm}
                 onChange={(e) => set("sizeHeightMm", e.target.value)}
+                onWheel={(e) => e.target.blur()}
+                ref={noWheelChange}
                 className={`w-full border rounded-xl px-3.5 py-2.5 text-sm outline-none transition-shadow ${
                   submitted && errs.sizeHeightMm ? "border-red-400 focus:border-red-500 focus:ring-4 focus:ring-red-500/15" : "border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
                 }`}
@@ -191,17 +244,23 @@ const STModal = ({ mode, initialValues, machines, processes, onClose, onSaved })
               Thickness (mm) <span className="text-red-500">*</span>
             </label>
             <input
-              type="number"
-              min={0.1}
-              step={0.1}
-              placeholder="e.g. 6"
+              type="text"
+              placeholder="e.g. 6 or 6L"
               value={v.thicknessMm}
               onChange={(e) => set("thicknessMm", e.target.value)}
               className={`w-full border rounded-xl px-3.5 py-2.5 text-sm outline-none transition-shadow ${
-                submitted && errs.thicknessMm ? "border-red-400 focus:border-red-500 focus:ring-4 focus:ring-red-500/15" : "border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
+                (submitted && errs.thicknessMm) || dupCheck.duplicate ? "border-red-400 focus:border-red-500 focus:ring-4 focus:ring-red-500/15" : "border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
               }`}
             />
-            {err("thicknessMm")}
+            {dupCheck.checking && (
+              <p className="text-xs text-slate-400 mt-1">Checking for an existing entry…</p>
+            )}
+            {!dupCheck.checking && dupCheck.duplicate && (
+              <p className="text-xs text-red-500 mt-1">
+                An entry already exists for this Machine + Size + Thickness combination.
+              </p>
+            )}
+            {!dupCheck.duplicate && err("thicknessMm")}
           </div>
 
           {/* Standard Time */}
@@ -213,10 +272,13 @@ const STModal = ({ mode, initialValues, machines, processes, onClose, onSaved })
               type="number"
               min={0.01}
               step={0.01}
-              placeholder="e.g. 2.5"
+              placeholder={dupCheck.duplicate ? "Already exists for this combination" : "e.g. 2.5"}
               value={v.standardTimeMin}
               onChange={(e) => set("standardTimeMin", e.target.value)}
-              className={`w-full border rounded-xl px-3.5 py-2.5 text-sm outline-none transition-shadow ${
+              onWheel={(e) => e.target.blur()}
+              ref={noWheelChange}
+              disabled={dupCheck.duplicate}
+              className={`w-full border rounded-xl px-3.5 py-2.5 text-sm outline-none transition-shadow disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed ${
                 submitted && errs.standardTimeMin ? "border-red-400 focus:border-red-500 focus:ring-4 focus:ring-red-500/15" : "border-slate-300 focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
               }`}
             />
@@ -240,7 +302,7 @@ const STModal = ({ mode, initialValues, machines, processes, onClose, onSaved })
               className="rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium px-4 py-2.5 disabled:opacity-60">
               Cancel
             </button>
-            <button type="submit" disabled={saving}
+            <button type="submit" disabled={saving || dupCheck.duplicate}
               className="inline-flex items-center gap-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-4 py-2.5 shadow-sm disabled:opacity-70">
               {saving ? "Saving…" : mode === "add" ? "Add" : "Save Changes"}
             </button>
