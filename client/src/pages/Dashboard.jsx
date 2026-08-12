@@ -132,18 +132,17 @@ export default function Dashboard() {
     }
   };
 
-  // Downloads a full breakdown for the From/To range only — every active
-  // machine under every active process, each with its own card (zero-filled
-  // if it has no entries that range), not just the single combined "All
-  // Machines" total. Deliberately ignores the Process/Machine dropdown
-  // filters at the top of the page — those narrow what's shown on screen,
-  // but the PDF is meant to always be the complete picture for the dates.
+  // Always downloads TODAY's data only — deliberately ignores both the
+  // From/To range and the Process/Machine dropdown filters at the top of
+  // the page (those only affect what's shown on screen). Every active
+  // machine under every active process gets its own card (zero-filled if
+  // it has no entries today), plus an overall grand total, so this is
+  // meant to be run fresh each day as a daily report, not a range export.
   const runQuickDownload = async () => {
     setDownloadingQuick(true);
     try {
-      const res = await downloadDashboardOeeReport({ from: reportFrom, to: reportTo });
-      const suffix = reportFrom === reportTo ? reportFrom : `${reportFrom}_to_${reportTo}`;
-      triggerBlobDownload(res.data, `OEE-Report_${suffix}.pdf`);
+      const res = await downloadDashboardOeeReport({ from: todayStr(), to: todayStr() });
+      triggerBlobDownload(res.data, `OEE-Report_${todayStr()}.pdf`);
     } catch (err) {
       console.error("Failed to download report", err);
       toast.error?.("Failed to download report");
@@ -318,11 +317,11 @@ export default function Dashboard() {
                 <button
                   onClick={runQuickDownload}
                   disabled={downloadingQuick}
-                  title="Download a PDF with every machine's Efficiency Report for the From/To range above (all machines, zero-filled if no entries — ignores the Process/Machine filters at the top of the page)"
+                  title="Download today's Efficiency Report PDF — every machine, zero-filled if no entries today (always today's date; ignores the From/To range and the Process/Machine filters above)"
                   className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors disabled:opacity-60"
                 >
                   <Download className="w-4 h-4" />
-                  {downloadingQuick ? "Downloading…" : "Download PDF"}
+                  {downloadingQuick ? "Downloading…" : "Download Today's PDF"}
                 </button>
                 <button
                   onClick={() => setShowCustomReport(true)}
