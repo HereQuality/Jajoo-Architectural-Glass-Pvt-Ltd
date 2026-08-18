@@ -2,46 +2,18 @@ const Machine = require("../models/Machine");
 
 const timeRx = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
-// Nested populate: processes -> each process's own default Shift (Process
-// Master). Machine Master needs the Shift's on/off time to compute the
-// Shift Time column below, without a second round-trip per machine.
-const PROCESSES_WITH_SHIFT_POPULATE = {
-  path: "processes",
-  select: "processName shift",
-  populate: { path: "shift", select: "shiftOnTime shiftOffTime" },
-};
+const PROCESSES_POPULATE = { path: "processes", select: "processName" };
 
-// Attaches a computed `shiftTime` ({ onTime, offTime } | null) to each
-// machine, combining the machine's own manually-entered
-// machineOnTime/machineOffTime with its (first) process's Shift:
-//   onTime  = min(Shift On Time,  Machine On Time)
-//   offTime = max(Shift Off Time, Machine Off Time)
-// Falls back to just the manual machine times if no process/shift is
-// configured, or to just the shift if no manual machine times are set yet.
-// `null` when neither is available. This value itself is NEVER directly
-// editable — only machineOnTime/machineOffTime (the raw inputs) are.
+// Attaches `shiftTime` ({ onTime, offTime } | null) to each machine —
+// exactly the machineOnTime/machineOffTime the user entered as Shift Time
+// Start/End on this machine, no other source. `null` when neither is set
+// yet. This value itself is never directly editable — only
+// machineOnTime/machineOffTime (the raw inputs) are.
 function attachShiftTime(machines) {
   return machines.map((m) => {
     const machineObj = typeof m.toObject === "function" ? m.toObject() : { ...m };
-    const shift = (machineObj.processes || [])
-      .map((p) => (typeof p === "object" ? p.shift : null))
-      .find((s) => s && s.shiftOnTime && s.shiftOffTime) || null;
-
-    const mOn = machineObj.machineOnTime;
-    const mOff = machineObj.machineOffTime;
-
-    if (shift && mOn && mOff) {
-      machineObj.shiftTime = {
-        onTime: mOn < shift.shiftOnTime ? mOn : shift.shiftOnTime,
-        offTime: mOff > shift.shiftOffTime ? mOff : shift.shiftOffTime,
-      };
-    } else if (mOn && mOff) {
-      machineObj.shiftTime = { onTime: mOn, offTime: mOff };
-    } else if (shift) {
-      machineObj.shiftTime = { onTime: shift.shiftOnTime, offTime: shift.shiftOffTime };
-    } else {
-      machineObj.shiftTime = null;
-    }
+    const { machineOnTime: mOn, machineOffTime: mOff } = machineObj;
+    machineObj.shiftTime = (mOn && mOff) ? { onTime: mOn, offTime: mOff } : null;
     return machineObj;
   });
 }
@@ -152,7 +124,7 @@ exports.deleteMachine = async (req, res) => {
 exports.getMachineById = async (req, res) => {
   try {
     const { machineId } = req.params;
-    const machine = await Machine.findOne({ _id: machineId }).populate(PROCESSES_WITH_SHIFT_POPULATE).lean();
+    const machine = await Machine.findOne({ _id: machineId }).populate(PROCESSES_POPULATE).lean();
 
     if (!machine) {
       return res.status(404).json({ isOk: false, message: "Machine not found" });
@@ -170,7 +142,7 @@ exports.getMachineById = async (req, res) => {
 exports.listMachines = async (req, res) => {
   try {
     const machines = await Machine.find({ isActive: true })
-      .populate(PROCESSES_WITH_SHIFT_POPULATE)
+      .populate(PROCESSES_POPULATE)
       .sort({ machineName: 1 })
       .lean();
     const withShiftTime = attachShiftTime(machines);
@@ -206,7 +178,7 @@ exports.listMachineByParams = async (req, res) => {
     const [totalCount, machines] = await Promise.all([
       Machine.countDocuments(query),
       Machine.find(query)
-        .populate(PROCESSES_WITH_SHIFT_POPULATE)
+        .populate(PROCESSES_POPULATE)
         .sort(sortQuery)
         .skip(parseInt(skip))
         .limit(parseInt(per_page))
