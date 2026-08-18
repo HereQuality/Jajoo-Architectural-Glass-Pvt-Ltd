@@ -53,10 +53,14 @@ const validate = (values) => {
     errors.description = `Description must be ${DESC_MAX} characters or fewer`;
   }
 
-  if (values.machineOnTime && !TIME_RX.test(values.machineOnTime)) {
+  if (!values.machineOnTime) {
+    errors.machineOnTime = "Shift Time Start is required";
+  } else if (!TIME_RX.test(values.machineOnTime)) {
     errors.machineOnTime = "Use HH:mm format";
   }
-  if (values.machineOffTime && !TIME_RX.test(values.machineOffTime)) {
+  if (!values.machineOffTime) {
+    errors.machineOffTime = "Shift Time End is required";
+  } else if (!TIME_RX.test(values.machineOffTime)) {
     errors.machineOffTime = "Use HH:mm format";
   }
 
@@ -230,7 +234,7 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
           {/* Shift Time Start/End */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Shift Time Start</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Shift Time Start <span className="text-red-500">*</span></label>
               <TimePicker
                 name="machineOnTime"
                 value={values.machineOnTime}
@@ -242,7 +246,7 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Shift Time End</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Shift Time End <span className="text-red-500">*</span></label>
               <TimePicker
                 name="machineOffTime"
                 value={values.machineOffTime}

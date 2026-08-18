@@ -20,8 +20,10 @@ function attachShiftTime(machines) {
 
 function validateMachineTimes(body) {
   const errors = {};
-  if (body.machineOnTime && !timeRx.test(body.machineOnTime)) errors.machineOnTime = "Machine Start Time must be HH:mm";
-  if (body.machineOffTime && !timeRx.test(body.machineOffTime)) errors.machineOffTime = "Machine End Time must be HH:mm";
+  if (!body.machineOnTime) errors.machineOnTime = "Shift Time Start is required";
+  else if (!timeRx.test(body.machineOnTime)) errors.machineOnTime = "Machine Start Time must be HH:mm";
+  if (!body.machineOffTime) errors.machineOffTime = "Shift Time End is required";
+  else if (!timeRx.test(body.machineOffTime)) errors.machineOffTime = "Machine End Time must be HH:mm";
   return errors;
 }
 
@@ -70,13 +72,7 @@ exports.updateMachine = async (req, res) => {
       return res.status(400).json({ isOk: false, errors: timeErrors, message: "Please fix the highlighted fields" });
     }
 
-    // Empty string means "clear this time" — casting "" against the HH:mm
-    // regex would fail validation, so translate it to an explicit unset.
-    const update = { ...req.body };
-    if (update.machineOnTime === "") update.machineOnTime = null;
-    if (update.machineOffTime === "") update.machineOffTime = null;
-
-    const machine = await Machine.findOneAndUpdate({ _id: machineId }, update, {
+    const machine = await Machine.findOneAndUpdate({ _id: machineId }, req.body, {
       new: true,
       runValidators: true,
     });

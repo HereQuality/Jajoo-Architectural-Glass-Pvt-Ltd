@@ -24,18 +24,18 @@ const MachineSchema = new mongoose.Schema(
         ref: "Process",
       },
     ],
-    // Machine's own default operating schedule — manually entered here.
-    // The Shift Time column/field shown elsewhere is DERIVED from these
-    // (combined with the machine's process's Shift via min/max) and is
-    // never itself directly editable; these two raw fields are.
+    // Machine's own Shift Time Start/End — the machine's scheduled
+    // operating window, shown as-is in the Shift Time column elsewhere.
     machineOnTime: {
       type: String, // "HH:mm"
       trim: true,
+      required: [true, "Shift Time Start is required"],
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Machine Start Time must be HH:mm"],
     },
     machineOffTime: {
       type: String, // "HH:mm"
       trim: true,
+      required: [true, "Shift Time End is required"],
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Machine End Time must be HH:mm"],
     },
     isActive: {
