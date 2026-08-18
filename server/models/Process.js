@@ -13,6 +13,13 @@ const ProcessSchema = new mongoose.Schema(
       trim: true,
       maxlength: [300, "Description must be 300 characters or fewer"],
     },
+    // Default Shift for this process — Grinding Data Entry auto-fills the
+    // entry's Shift (and Shift On/Off Time) from this the moment Process is
+    // selected, so the operator doesn't have to also pick a Shift by hand.
+    shift: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shift",
+    },
     isActive: {
       type: Boolean,
       default: true,

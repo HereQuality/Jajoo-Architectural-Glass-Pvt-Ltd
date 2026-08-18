@@ -61,6 +61,7 @@ const SETUP_MENUS = [
   { menuName: "Machine Master", menuUrl: "/hqepl/production/machines", sequence: 2, icon: "Factory" },
   { menuName: "Operator Master", menuUrl: "/hqepl/production/operators", sequence: 3, icon: "UserCog" },
   { menuName: "Standard Time Master", menuUrl: "/hqepl/production/standard-time", sequence: 4, icon: "Timer" },
+  { menuName: "Shift Master", menuUrl: "/hqepl/production/shift-master", sequence: 5, icon: "Clock" },
 ];
 
 const DATA_ENTRY_MENUS = [

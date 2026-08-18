@@ -61,6 +61,7 @@ const MachineMaster = lazyWithRetry(() => import("../pages/MachineMaster"));
 const ProcessMaster = lazyWithRetry(() => import("../pages/ProcessMaster"));
 const OperatorMaster = lazyWithRetry(() => import("../pages/OperatorMaster"));
 const StandardTimeMaster = lazyWithRetry(() => import("../pages/StandardTimeMaster"));
+const ShiftMaster = lazyWithRetry(() => import("../pages/ShiftMaster"));
 const GrindingEntry = lazyWithRetry(() => import("../pages/GrindingEntry"));
 const Dashboard = lazyWithRetry(() => import("../pages/Dashboard"));
 
@@ -117,6 +118,7 @@ const protectedRoutes = [
   { path: "/production/processes", component: <ProcessMaster /> },
   { path: "/production/operators", component: <OperatorMaster /> },
   { path: "/production/standard-time", component: <StandardTimeMaster /> },
+  { path: "/production/shift-master", component: <ShiftMaster /> },
   { path: "/production/data-entry", component: <GrindingEntry /> },
   { path: "/dashboard", component: <Dashboard /> },
 

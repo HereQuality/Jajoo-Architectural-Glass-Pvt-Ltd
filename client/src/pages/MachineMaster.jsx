@@ -6,6 +6,7 @@ import { MenuContext } from "../context/MenuContext";
 import DeleteModal from "../Components/Common/DeleteModal";
 import Tooltip from "../Components/Common/Tooltip";
 import StatusCheckbox from "../Components/Common/StatusCheckbox";
+import TimePicker from "../Components/Common/TimePicker";
 import { useInvalidateMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import {
@@ -20,12 +21,15 @@ import {
 const NAME_MAX = 100;
 const CODE_MAX = 20;
 const DESC_MAX = 300;
+const TIME_RX = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 const initialState = {
   machineName: "",
   machineCode: "",
   description: "",
   processes: [],
+  machineOnTime: "",
+  machineOffTime: "",
   isActive: true,
 };
 
@@ -47,6 +51,13 @@ const validate = (values) => {
   const desc = (values.description || "").trim();
   if (desc.length > DESC_MAX) {
     errors.description = `Description must be ${DESC_MAX} characters or fewer`;
+  }
+
+  if (values.machineOnTime && !TIME_RX.test(values.machineOnTime)) {
+    errors.machineOnTime = "Use HH:mm format";
+  }
+  if (values.machineOffTime && !TIME_RX.test(values.machineOffTime)) {
+    errors.machineOffTime = "Use HH:mm format";
   }
 
   return errors;
@@ -91,6 +102,8 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
           machineCode: values.machineCode.trim(),
           description: values.description.trim(),
           processes: values.processes || [],
+          machineOnTime: values.machineOnTime || "",
+          machineOffTime: values.machineOffTime || "",
           isActive: values.isActive,
         });
         if (res.data.isOk) {
@@ -103,6 +116,8 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
           machineCode: values.machineCode.trim(),
           description: values.description.trim(),
           processes: values.processes || [],
+          machineOnTime: values.machineOnTime || "",
+          machineOffTime: values.machineOffTime || "",
           isActive: values.isActive,
         });
         toast.success?.("Machine updated successfully!");
@@ -110,6 +125,8 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
       }
     } catch (err) {
       console.error(err);
+      const apiErrors = err.response?.data?.errors;
+      if (apiErrors) setFormErrors((prev) => ({ ...prev, ...apiErrors }));
       toast.error?.(err.response?.data?.message || "Failed to save machine.");
     } finally {
       setIsSaving(false);
@@ -210,6 +227,55 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
             </div>
           </div>
 
+          {/* Machine Start/End Time — manually entered here. The combined
+              "Shift Time" shown in the table (min of Shift On/Machine On,
+              max of Shift Off/Machine Off) is DERIVED from these plus the
+              machine's process's Shift, and is never itself directly
+              editable — only these two raw times are. */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Machine Start Time</label>
+              <TimePicker
+                name="machineOnTime"
+                value={values.machineOnTime}
+                onChange={handleChange}
+                hasError={isSubmit && !!formErrors.machineOnTime}
+              />
+              {isSubmit && formErrors.machineOnTime && (
+                <p className="text-xs text-red-500 mt-1">{formErrors.machineOnTime}</p>
+              )}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Machine End Time</label>
+              <TimePicker
+                name="machineOffTime"
+                value={values.machineOffTime}
+                onChange={handleChange}
+                hasError={isSubmit && !!formErrors.machineOffTime}
+              />
+              {isSubmit && formErrors.machineOffTime && (
+                <p className="text-xs text-red-500 mt-1">{formErrors.machineOffTime}</p>
+              )}
+            </div>
+          </div>
+
+          {/* Shift Time — read-only preview of the combined value described
+              above. Only shows once both this machine's own times and its
+              process's Shift are known. */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Shift Time
+              <span className="ml-1 text-xs text-slate-400 font-normal">(read-only, auto-calculated)</span>
+            </label>
+            <input
+              type="text"
+              readOnly
+              disabled
+              value={mode === "edit" && values.shiftTime ? `${values.shiftTime.onTime} – ${values.shiftTime.offTime}` : "—"}
+              className="w-full border border-slate-200 bg-slate-50 rounded-xl px-3.5 py-2.5 text-sm text-slate-500 outline-none cursor-not-allowed"
+            />
+          </div>
+
           {/* Active toggle */}
           <div className="flex items-center gap-2 pt-1">
             <input
@@ -294,7 +360,10 @@ const MachineMaster = () => {
           machineCode: m.machineCode || "",
           description: m.description || "",
           processes: (m.processes || []).map((p) => (typeof p === "object" ? p._id : p)),
+          machineOnTime: m.machineOnTime || "",
+          machineOffTime: m.machineOffTime || "",
           isActive: m.isActive,
+          shiftTime: m.shiftTime || null,
         });
         setEditMachineId(id);
       })
@@ -355,6 +424,7 @@ const MachineMaster = () => {
               <th className="px-4 py-3 font-medium">Code</th>
               <th className="px-4 py-3 font-medium">Description</th>
               <th className="px-4 py-3 font-medium">Processes</th>
+              <th className="px-4 py-3 font-medium">Shift Time</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium text-right">Actions</th>
             </tr>
@@ -362,7 +432,7 @@ const MachineMaster = () => {
           <tbody>
             {machines.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-slate-400">
+                <td colSpan={7} className="px-4 py-10 text-center text-slate-400">
                   {isLoading ? "Loading…" : "No machines found. Click 'Add Machine' to create one."}
                 </td>
               </tr>
@@ -391,6 +461,9 @@ const MachineMaster = () => {
                       ))}
                     </div>
                   )}
+                </td>
+                <td className="px-4 py-3 text-slate-600 font-mono text-xs whitespace-nowrap">
+                  {m.shiftTime ? `${m.shiftTime.onTime} – ${m.shiftTime.offTime}` : <span className="text-slate-400 font-sans">—</span>}
                 </td>
                 <td className="px-4 py-3">
                   <span

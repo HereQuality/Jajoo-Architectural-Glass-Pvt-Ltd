@@ -7,6 +7,7 @@ import DeleteModal from "../Components/Common/DeleteModal";
 import Tooltip from "../Components/Common/Tooltip";
 import StatusCheckbox from "../Components/Common/StatusCheckbox";
 import { useInvalidateProcesses } from "../hooks/useProcesses";
+import { useShifts } from "../hooks/useShifts";
 import {
   createProcess,
   updateProcess,
@@ -22,6 +23,7 @@ const DESC_MAX = 300;
 const initialState = {
   processName: "",
   description: "",
+  shift: "",
   isActive: true,
 };
 
@@ -46,6 +48,7 @@ const validate = (values) => {
 // ── Sub-component: Add / Edit Modal ───────────────────────────────────────
 const ProcessFormModal = ({ mode, initialValues, onClose, onSaved }) => {
   const toast = useAlert() || toastify;
+  const { data: shiftOptions = [] } = useShifts();
   const [values, setValues] = useState(initialValues);
   const [formErrors, setFormErrors] = useState({});
   const [isSubmit, setIsSubmit] = useState(false);
@@ -69,6 +72,7 @@ const ProcessFormModal = ({ mode, initialValues, onClose, onSaved }) => {
         const res = await createProcess({
           processName: values.processName.trim(),
           description: values.description.trim(),
+          shift: values.shift || "",
           isActive: values.isActive,
         });
         if (res.data.isOk) {
@@ -79,6 +83,7 @@ const ProcessFormModal = ({ mode, initialValues, onClose, onSaved }) => {
         await updateProcess(initialValues._id, {
           processName: values.processName.trim(),
           description: values.description.trim(),
+          shift: values.shift || "",
           isActive: values.isActive,
         });
         toast.success?.("Process updated successfully!");
@@ -142,6 +147,27 @@ const ProcessFormModal = ({ mode, initialValues, onClose, onSaved }) => {
             {isSubmit && formErrors.description && (
               <p className="text-xs text-red-500 mt-1">{formErrors.description}</p>
             )}
+          </div>
+
+          {/* Default Shift — Grinding Data Entry auto-fills the entry's
+              Shift (and its On/Off Time) from this the moment this Process
+              is selected, so the operator doesn't pick a Shift by hand. */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Default Shift
+              <span className="ml-1 text-xs text-slate-400 font-normal">(auto-applied in Grinding Data Entry)</span>
+            </label>
+            <select
+              name="shift"
+              value={values.shift || ""}
+              onChange={handleChange}
+              className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15"
+            >
+              <option value="">No default shift</option>
+              {shiftOptions.map((s) => (
+                <option key={s._id} value={s._id}>{s.shiftName} ({s.shiftOnTime}–{s.shiftOffTime})</option>
+              ))}
+            </select>
           </div>
 
           {/* Active toggle */}
@@ -226,6 +252,7 @@ const ProcessMaster = () => {
           _id: id,
           processName: p.processName || "",
           description: p.description || "",
+          shift: typeof p.shift === "object" ? p.shift?._id || "" : p.shift || "",
           isActive: p.isActive,
         });
         setEditProcessId(id);
@@ -285,6 +312,7 @@ const ProcessMaster = () => {
             <tr className="bg-slate-50 text-slate-600 text-left">
               <th className="px-4 py-3 font-medium">Process Name</th>
               <th className="px-4 py-3 font-medium">Description</th>
+              <th className="px-4 py-3 font-medium">Default Shift</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium text-right">Actions</th>
             </tr>
@@ -292,7 +320,7 @@ const ProcessMaster = () => {
           <tbody>
             {processes.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-4 py-10 text-center text-slate-400">
+                <td colSpan={5} className="px-4 py-10 text-center text-slate-400">
                   {isLoading ? "Loading…" : "No processes found. Click 'Add Process' to create one."}
                 </td>
               </tr>
@@ -304,6 +332,9 @@ const ProcessMaster = () => {
                   <Tooltip text={p.description}>
                     <span className="block truncate">{p.description || "—"}</span>
                   </Tooltip>
+                </td>
+                <td className="px-4 py-3 text-slate-600 font-mono text-xs whitespace-nowrap">
+                  {p.shift ? `${p.shift.shiftName} (${p.shift.shiftOnTime}–${p.shift.shiftOffTime})` : <span className="text-slate-400 font-sans">—</span>}
                 </td>
                 <td className="px-4 py-3">
                   <span

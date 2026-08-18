@@ -3,7 +3,7 @@ const Process = require("../models/Process");
 // Create Process
 exports.createProcess = async (req, res) => {
   try {
-    const { processName, description, isActive } = req.body;
+    const { processName, description, isActive, shift } = req.body;
 
     if (!processName || !processName.trim()) {
       return res.status(400).json({ isOk: false, message: "Process name is required" });
@@ -12,6 +12,7 @@ exports.createProcess = async (req, res) => {
     const newProcess = await Process.create({
       processName: processName.trim(),
       description: description ? description.trim() : undefined,
+      shift: shift || undefined,
       isActive,
     });
 
@@ -31,7 +32,12 @@ exports.updateProcess = async (req, res) => {
   try {
     const { processId } = req.params;
 
-    const process = await Process.findOneAndUpdate({ _id: processId }, req.body, {
+    // Empty string means "clear the default shift" — casting "" straight to
+    // ObjectId would throw, so translate it to an explicit unset instead.
+    const update = { ...req.body };
+    if (update.shift === "") update.shift = null;
+
+    const process = await Process.findOneAndUpdate({ _id: processId }, update, {
       new: true,
     });
 
@@ -78,7 +84,7 @@ exports.deleteProcess = async (req, res) => {
 exports.getProcessById = async (req, res) => {
   try {
     const { processId } = req.params;
-    const process = await Process.findOne({ _id: processId });
+    const process = await Process.findOne({ _id: processId }).populate("shift", "shiftName shiftOnTime shiftOffTime");
 
     if (!process) {
       return res.status(404).json({ isOk: false, message: "Process not found" });
@@ -94,7 +100,9 @@ exports.getProcessById = async (req, res) => {
 // List all Processes (no pagination) — used to populate dropdowns
 exports.listProcesses = async (req, res) => {
   try {
-    const processes = await Process.find({ isActive: true }).sort({ processName: 1 });
+    const processes = await Process.find({ isActive: true })
+      .populate("shift", "shiftName shiftOnTime shiftOffTime")
+      .sort({ processName: 1 });
     res.status(200).json({ isOk: true, data: processes });
   } catch (error) {
     console.error("Error listing processes:", error);
@@ -126,7 +134,12 @@ exports.listProcessByParams = async (req, res) => {
 
     const [totalCount, processes] = await Promise.all([
       Process.countDocuments(query),
-      Process.find(query).sort(sortQuery).skip(parseInt(skip)).limit(parseInt(per_page)).lean(),
+      Process.find(query)
+        .populate("shift", "shiftName shiftOnTime shiftOffTime")
+        .sort(sortQuery)
+        .skip(parseInt(skip))
+        .limit(parseInt(per_page))
+        .lean(),
     ]);
 
     res.status(200).json({

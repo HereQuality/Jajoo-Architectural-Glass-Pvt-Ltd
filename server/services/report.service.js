@@ -433,4 +433,54 @@ function buildEfficiencyCardPdf({ agg, from, to, filterDescription }) {
   return doc;
 }
 
-module.exports = { buildOeeReportPdf, buildOeeDashboardPdf, buildDailyOeeTrendPdf, buildEfficiencyCardPdf, ALL_COLUMNS };
+// Grinding Efficiency Report (Machine Efficiency / Operator Efficiency tabs)
+// — one row per machine/operator, mirroring the on-screen table in
+// GrindingEntry.jsx's EfficiencyModal (MACHINE_COLUMNS / OPERATOR_COLUMNS).
+const fmtPctOrNa = (n) => (n == null ? "NA" : `${Number(n).toFixed(2)}%`);
+const fmtQtyOrNa = (n) => (n == null ? "NA" : String(Math.round(Number(n))));
+
+function buildGrindingEfficiencyPdf({ tab, rows, from, to, filterDescription }) {
+  const doc = new PDFDocument({ margin: 30, layout: "landscape", size: "A4" });
+
+  const nameLabel = tab === "operators" ? "Operator" : "Machine";
+  doc.fontSize(16).font("Helvetica-Bold").fillColor("#0a1930").text(`Grinding ${nameLabel} Efficiency Report`);
+  doc.moveDown(0.3);
+  if (filterDescription) doc.fontSize(10).font("Helvetica").fillColor("#334155").text(filterDescription);
+  doc.fontSize(9).fillColor("#64748b").text(from === to ? `Date: ${from}` : `Date Range: ${from} to ${to}`);
+  doc.moveDown(0.8);
+
+  if (!rows || rows.length === 0) {
+    doc.fontSize(11).fillColor("#64748b").text(`No ${nameLabel.toLowerCase()} entries found for the selected filters.`);
+    return doc;
+  }
+
+  const cols = tab === "operators"
+    ? [
+        { key: "name", label: nameLabel, width: 160 },
+        { key: "processQty", label: "Actual Total Qty Produced", width: 120, fmt: fmtQtyOrNa },
+        { key: "okQty", label: "Total OK Qty", width: 100, fmt: fmtQtyOrNa },
+        { key: "performanceRatio", label: "Performance Ratio", width: 110, fmt: fmtPctOrNa },
+        { key: "qualityRatio", label: "Quality Ratio", width: 100, fmt: fmtPctOrNa },
+      ]
+    : [
+        { key: "name", label: nameLabel, width: 140 },
+        { key: "processQty", label: "Process Qty", width: 90, fmt: fmtQtyOrNa },
+        { key: "okQty", label: "OK Qty", width: 80, fmt: fmtQtyOrNa },
+        { key: "oeePercent", label: "OEE %", width: 80, fmt: fmtPctOrNa },
+        { key: "availabilityRatio", label: "Availability", width: 90, fmt: fmtPctOrNa },
+        { key: "performanceRatio", label: "Performance", width: 90, fmt: fmtPctOrNa },
+        { key: "qualityRatio", label: "Quality", width: 80, fmt: fmtPctOrNa },
+      ];
+
+  const tableColumns = cols.map((c) => ({ key: c.key, label: c.label, width: c.width }));
+  const tableRows = rows.map((r) => cols.map((c) => (c.key === "name" ? r.name : c.fmt(r[c.key]))));
+
+  drawTable(doc, { x: 30, columns: tableColumns, rows: tableRows });
+
+  return doc;
+}
+
+module.exports = {
+  buildOeeReportPdf, buildOeeDashboardPdf, buildDailyOeeTrendPdf, buildEfficiencyCardPdf,
+  buildGrindingEfficiencyPdf, drawTable, ALL_COLUMNS,
+};

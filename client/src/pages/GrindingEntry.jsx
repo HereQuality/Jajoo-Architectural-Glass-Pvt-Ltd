@@ -1,16 +1,20 @@
 import React, { useState, useEffect, useMemo } from "react";
 import ReactDOM from "react-dom";
-import ExcelJS from "exceljs";
-import { Plus, X, Factory, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download } from "lucide-react";
+import Select, { components as selectComponents } from "react-select";
+import { Plus, X, Factory, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
 import { useMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import { useOperators } from "../hooks/useOperators";
+import { useShifts } from "../hooks/useShifts";
 import { useDebounce } from "../hooks/useDebounce";
 import { listStandardTimes } from "../api/standardTime.api";
-import { createProductionEntry, listProductionEntries, updateProductionEntry, deleteProductionEntry, getProductionEfficiency } from "../api/productionEntries.api";
+import {
+  createProductionEntry, listProductionEntries, updateProductionEntry, deleteProductionEntry,
+  getProductionEfficiency, downloadGrindingEfficiencyPdf, getShiftTimeReport,
+} from "../api/productionEntries.api";
 import DatePicker from "../Components/Common/DatePicker";
 import TimePicker from "../Components/Common/TimePicker";
 import DeleteModal from "../Components/Common/DeleteModal";
@@ -32,6 +36,12 @@ const STOPPAGE_FIELDS = [
   { key: "othersMin",                  label: "Others (Minutes)" },
 ];
 
+// Fields that feed the Total Stoppage sum — Planned Downtime is still an
+// entered/stored field (STOPPAGE_FIELDS above), it just doesn't count
+// toward Total Stoppage. Mirrors server/services/productionCalculation
+// .service.js's STOPPAGE_KEYS exactly.
+const TOTAL_STOPPAGE_FIELDS = STOPPAGE_FIELDS.filter((f) => f.key !== "plannedDowntimeMin");
+
 // ── Calculated (derived) columns shown in the sheet, in order ────────────
 // Each entry: key inside e.calculated, label, and the exact formula text
 // shown when the "eye" icon on that column header is clicked.
@@ -40,14 +50,14 @@ const CALC_COLUMNS = [
     key: "workingScheduleMin",
     label: "Working Schedule Time",
     unit: "min",
-    formula: "Working Schedule Time = (M/C Off Time − M/C Start Time) + Overtime",
+    formula: "Working Schedule Time = span from the earlier of Shift On Time/M/C Start Time to the later of Shift Off Time/M/C Off Time",
   },
   {
     key: "totalStoppageMin",
     label: "Total Stoppage",
     unit: "min",
     formula:
-      "Total Stoppage = Planned Downtime + No Manpower + Mechanical Breakdown + Electrical Breakdown + Raw Material Not Available + Stoppage (Human Error) + Changeover + Raw Material Problem + No Power + Others",
+      "Total Stoppage = No Manpower + Mechanical Breakdown + Electrical Breakdown + Raw Material Not Available + Stoppage (Human Error) + Changeover + Raw Material Problem + No Power + Others (Planned Downtime is entered separately and not included here)",
   },
   {
     key: "availableWorkingMin",
@@ -94,6 +104,8 @@ const CALC_COLUMNS = [
 ];
 
 const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if Available Working Time is NA)";
+const OVERTIME_FORMULA = "Overtime = max(0, Shift On − M/C Start) + max(0, M/C Off − Shift Off) — minutes the machine ran outside its scheduled Shift window";
+const DELAY_EARLY_FORMULA = "Start Delay = max(0, M/C Start − Shift On)  ·  Early Closed = max(0, Shift Off − M/C Off) — computed independently, so both can be non-zero on the same entry (e.g. machine starts late AND finishes early)";
 
 const buildInit = (machineId = "") => ({
   date: new Date().toISOString().split("T")[0],
@@ -101,13 +113,15 @@ const buildInit = (machineId = "") => ({
   mcOffTime: "",
   machine: machineId,
   operator: "",
+  shift: "",
+  shiftOnTime: "",
+  shiftOffTime: "",
   sizeWidthMm: "",
   sizeHeightMm: "",
   thicknessMm: "",
   standardTimePerPieceMin: "",
   processQty: "",
   okQty: "",
-  overtimeMin: "0",
   othersRemark: "",
   ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, "0"])),
 });
@@ -130,16 +144,57 @@ const timeToMinutes = (hhmm) => {
   return h * 60 + m;
 };
 
+// Shortest signed distance (minutes) from `from` (HH:mm) to `to` (HH:mm) —
+// mirrors server/services/productionCalculation.service.js's signedDiffMin.
+const signedDiffMin = (from, to) => {
+  let diff = (timeToMinutes(to) - timeToMinutes(from) + 1440) % 1440;
+  if (diff > 720) diff -= 1440;
+  return diff;
+};
+
+// Overtime / Start Delay / Early Closed, derived from the selected Shift's
+// On/Off Time vs. the entered M/C Start/Off Time — mirrors
+// server/services/productionCalculation.service.js's deriveShiftDelta
+// exactly, so the client-side preview never disagrees with what gets saved.
+// Informational only — does NOT feed into Working Schedule Time below.
+const deriveShiftDelta = (shiftOnTime, shiftOffTime, mcStartTime, mcOffTime) => {
+  if (!shiftOnTime || !shiftOffTime) return { overtimeMin: 0, startDelayMin: 0, earlyClosedMin: 0 };
+  const startDeltaMin = signedDiffMin(shiftOnTime, mcStartTime);
+  const offDeltaMin = signedDiffMin(shiftOffTime, mcOffTime);
+  const startDelayMin = Math.max(0, startDeltaMin);
+  const earlyStartMin = Math.max(0, -startDeltaMin);
+  const lateFinishMin = Math.max(0, offDeltaMin);
+  const earlyClosedMin = Math.max(0, -offDeltaMin);
+  return { overtimeMin: earlyStartMin + lateFinishMin, startDelayMin, earlyClosedMin };
+};
+
+// Working Schedule Time = span from the earlier of Shift On/M-C Start Time
+// to the later of Shift Off/M-C Off Time — a direct min/max condition,
+// mirrors server/services/productionCalculation.service.js's
+// workingScheduleEnvelopeMin exactly (computed independently of Overtime).
+const computeWorkingScheduleMin = (shiftOnTime, shiftOffTime, mcStartTime, mcOffTime) => {
+  if (!shiftOnTime || !shiftOffTime) {
+    let d = timeToMinutes(mcOffTime) - timeToMinutes(mcStartTime);
+    if (d <= 0) d += 24 * 60;
+    return d;
+  }
+  let shiftOwnDurationMin = timeToMinutes(shiftOffTime) - timeToMinutes(shiftOnTime);
+  if (shiftOwnDurationMin <= 0) shiftOwnDurationMin += 24 * 60;
+  const startDeltaMin = signedDiffMin(shiftOnTime, mcStartTime);
+  const offDeltaMin = signedDiffMin(shiftOffTime, mcOffTime);
+  const effectiveStartOffsetMin = Math.min(0, startDeltaMin);
+  const effectiveEndOffsetMin = Math.max(0, offDeltaMin);
+  return Math.max(shiftOwnDurationMin - effectiveStartOffsetMin + effectiveEndOffsetMin, 0);
+};
+
 // Returns null (NA) when total stoppage consumes the whole working schedule
 // — mirrors server/services/productionCalculation.service.js exactly,
-// including subtracting Planned Downtime exactly ONCE (it's already inside
-// totalStoppageMin as STOPPAGE_FIELDS[0], not subtracted again separately).
+// including excluding Planned Downtime from the Total Stoppage sum (see
+// TOTAL_STOPPAGE_FIELDS above).
 const computeIdealProductionQty = (v) => {
   const num = (x) => Number(x) || 0;
-  let shiftDurationMin = timeToMinutes(v.mcOffTime) - timeToMinutes(v.mcStartTime);
-  if (shiftDurationMin <= 0) shiftDurationMin += 24 * 60;
-  const totalStoppageMin = STOPPAGE_FIELDS.reduce((s, f) => s + num(v[f.key]), 0);
-  const workingScheduleMin = Math.max(shiftDurationMin + num(v.overtimeMin), 0);
+  const totalStoppageMin = TOTAL_STOPPAGE_FIELDS.reduce((s, f) => s + num(v[f.key]), 0);
+  const workingScheduleMin = computeWorkingScheduleMin(v.shiftOnTime, v.shiftOffTime, v.mcStartTime, v.mcOffTime);
   if (totalStoppageMin >= workingScheduleMin) return null;
   const availableWorkingMin = workingScheduleMin - totalStoppageMin;
   const std = num(v.standardTimePerPieceMin);
@@ -161,6 +216,7 @@ const validate = (v) => {
   if (!v.process) e.process = "Please select a process";
   if (!v.machine) e.machine = "Please select a machine";
   if (!v.operator) e.operator = "Please select an operator";
+  if (!v.shift) e.shift = "Please select a shift";
   if (!v.sizeWidthMm) e.sizeWidthMm = "Width is required";
   if (!v.sizeHeightMm) e.sizeHeightMm = "Height is required";
   if (!v.thicknessMm) e.thicknessMm = "Thickness is required";
@@ -196,7 +252,7 @@ const validate = (v) => {
   // that feeds it is itself already valid, so this doesn't pile on top of
   // more basic errors above.
   const stoppageFieldsClean = STOPPAGE_FIELDS.every((f) => !e[f.key]);
-  if (!e.mcStartTime && !e.mcOffTime && !e.standardTimePerPieceMin && !e.processQty && stoppageFieldsClean) {
+  if (!e.mcStartTime && !e.mcOffTime && !e.shift && !e.standardTimePerPieceMin && !e.processQty && stoppageFieldsClean) {
     const idealProductionQty = computeIdealProductionQty(v);
     if (idealProductionQty === null) {
       e.processQty =
@@ -339,54 +395,41 @@ const startOfMonth = () => {
 };
 const today = () => new Date().toISOString().split("T")[0];
 
-// Builds a real .xlsx workbook (not just a CSV) from the currently-visible
-// tab's rows/columns and triggers a download — every cell is formatted
-// exactly as it's shown on screen (e.g. "72.66%" / "NA"), so the file
-// matches what the user is looking at. Uses ExcelJS (not the `xlsx` package)
-// specifically because it can write real cell borders — SheetJS Community
-// Edition silently drops all styling (borders/fills) on write, so grid lines
-// only show up in ExcelJS output.
-const THIN_BORDER = { style: "thin", color: { argb: "FF64748B" } }; // slate-500, dark enough to read as a real grid line
-const CELL_BORDER = { top: THIN_BORDER, left: THIN_BORDER, bottom: THIN_BORDER, right: THIN_BORDER };
-
-const downloadExcel = async (filename, nameLabel, columns, rows) => {
-  const headers = [nameLabel, ...columns.map((c) => c.label)];
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet(`${nameLabel} Efficiency`.slice(0, 31));
-
-  const headerRow = ws.addRow(headers);
-  headerRow.eachCell((cell) => {
-    cell.font = { bold: true, color: { argb: "FF1E293B" } }; // slate-800
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } }; // slate-100
-    cell.border = CELL_BORDER;
-    cell.alignment = { vertical: "middle" };
-  });
-
-  for (const r of rows) {
-    const row = ws.addRow([r.name, ...columns.map((c) => (r[c.key] == null ? "NA" : c.fmt(r[c.key])))]);
-    row.eachCell((cell) => { cell.border = CELL_BORDER; });
-  }
-
-  ws.columns = headers.map((h) => ({ width: Math.max(h.length + 2, 14) }));
-
-  const buffer = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+// Triggers a browser download from an already-fetched blob response
+// (server-generated PDFs, e.g. downloadGrindingEfficiencyPdf).
+const triggerBlobDownload = (blobData, filename, mime = "application/pdf") => {
+  const blob = new Blob([blobData], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
+  a.remove();
   URL.revokeObjectURL(url);
 };
 
+// Checkbox-style option row for the Operator multi-select below.
+const CheckboxOption = (props) => (
+  <selectComponents.Option {...props}>
+    <div className="d-flex align-items-center" style={{ gap: 8 }}>
+      <input type="checkbox" checked={props.isSelected} onChange={() => null} />
+      <label className="m-0">{props.label}</label>
+    </div>
+  </selectComponents.Option>
+);
+
 const EfficiencyModal = ({ onClose }) => {
   const toast = useAlert() || toastify;
+  const { data: operators = [] } = useOperators();
   const [from, setFrom] = useState(startOfMonth());
   const [to, setTo] = useState(today());
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [data, setData] = useState({ operators: [], machines: [] });
   const [tab, setTab] = useState("machines"); // "machines" | "operators"
   const [search, setSearch] = useState("");
+  const [selectedOperators, setSelectedOperators] = useState([]); // array of operator names
   const debouncedSearch = useDebounce(search, 300);
 
   const load = () => {
@@ -403,14 +446,35 @@ const EfficiencyModal = ({ onClose }) => {
   const activeColumns = tab === "machines" ? MACHINE_COLUMNS : OPERATOR_COLUMNS;
   const nameLabel = tab === "machines" ? "Machine" : "Operator";
 
+  const switchTab = (t) => {
+    setTab(t);
+    setSearch("");
+    setSelectedOperators([]);
+  };
+
   const filteredRows = useMemo(() => {
+    if (tab === "operators") {
+      if (selectedOperators.length === 0) return activeRows;
+      const wanted = new Set(selectedOperators);
+      return activeRows.filter((r) => wanted.has(r.name));
+    }
     const q = debouncedSearch.trim().toLowerCase();
     if (!q) return activeRows;
     return activeRows.filter((r) => r.name.toLowerCase().includes(q));
-  }, [activeRows, debouncedSearch]);
+  }, [activeRows, debouncedSearch, tab, selectedOperators]);
 
   const handleDownload = () => {
-    downloadExcel(`${tab === "machines" ? "machine" : "operator"}-efficiency_${from}_to_${to}.xlsx`, nameLabel, activeColumns, filteredRows);
+    const params = { from, to, tab };
+    if (tab === "operators" && selectedOperators.length > 0) params.operator = selectedOperators.join(",");
+    else if (tab !== "operators" && search.trim()) params.match = search.trim();
+
+    setDownloading(true);
+    downloadGrindingEfficiencyPdf(params)
+      .then((res) => {
+        triggerBlobDownload(res.data, `${tab === "machines" ? "machine" : "operator"}-efficiency_${from}_to_${to}.pdf`);
+      })
+      .catch(() => toast.error?.("Failed to download PDF"))
+      .finally(() => setDownloading(false));
   };
 
   return ReactDOM.createPortal(
@@ -433,7 +497,7 @@ const EfficiencyModal = ({ onClose }) => {
           ].map((t) => (
             <button
               key={t.key}
-              onClick={() => setTab(t.key)}
+              onClick={() => switchTab(t.key)}
               className={`px-4 py-2 text-sm font-semibold rounded-t-lg border-b-2 transition-colors ${
                 tab === t.key
                   ? "border-brand-600 text-brand-700 dark:text-brand-300"
@@ -462,27 +526,164 @@ const EfficiencyModal = ({ onClose }) => {
             >
               {loading ? "Loading…" : "Apply Filter"}
             </button>
-            <div className="flex-1 min-w-[160px]">
-              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Search {nameLabel}</label>
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={`Search by ${nameLabel.toLowerCase()} name…`}
-                className="w-full border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white dark:bg-[#1a1a1a]"
-              />
-            </div>
+            {tab === "operators" ? (
+              <div className="flex-1 min-w-[220px]">
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Operator</label>
+                <Select
+                  isMulti
+                  closeMenuOnSelect={false}
+                  hideSelectedOptions={false}
+                  components={{ Option: CheckboxOption }}
+                  options={operators.map((op) => ({ value: op.name, label: op.name }))}
+                  value={selectedOperators.map((name) => ({ value: name, label: name }))}
+                  onChange={(selected) => setSelectedOperators((selected || []).map((o) => o.value))}
+                  placeholder="All Operators"
+                  classNamePrefix="rs"
+                  styles={{
+                    control: (base) => ({ ...base, minHeight: 38, borderRadius: 12, fontSize: 14 }),
+                    menu: (base) => ({ ...base, zIndex: 50 }),
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="flex-1 min-w-[160px]">
+                <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Search {nameLabel}</label>
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={`Search by ${nameLabel.toLowerCase()} name…`}
+                  className="w-full border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white dark:bg-[#1a1a1a]"
+                />
+              </div>
+            )}
             <button
               onClick={handleDownload}
-              disabled={loading || filteredRows.length === 0}
-              title="Download this table as an Excel file"
+              disabled={loading || downloading || filteredRows.length === 0}
+              title="Download this table as a PDF file"
               className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors disabled:opacity-50"
             >
-              <Download className="w-4 h-4" /> Download Excel
+              <Download className="w-4 h-4" /> {downloading ? "Downloading…" : "Download PDF"}
             </button>
           </div>
 
           <EfficiencyTable nameLabel={nameLabel} columns={activeColumns} rows={filteredRows} loading={loading} />
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+};
+
+// ── Shift Time Report — Machine, Shift Start/End, M/C On/Off, Overtime,
+// Start Delay / Early Closed for every entry in a date range. ─────────────
+const fmtMin = (n) => (n == null || Number(n) === 0 ? "—" : `${Number(n).toFixed(0)} min`);
+// Start Delay and Early Closed are computed independently (late start vs.
+// early finish) and CAN both be non-zero on the same entry (e.g. machine
+// starts late AND finishes early) — show every non-zero part, don't drop one.
+const fmtDelayOrEarly = (startDelayMin, earlyClosedMin) => {
+  const parts = [];
+  if (Number(startDelayMin) > 0) parts.push(`Delay ${Number(startDelayMin).toFixed(0)} min`);
+  if (Number(earlyClosedMin) > 0) parts.push(`Early ${Number(earlyClosedMin).toFixed(0)} min`);
+  return parts.length > 0 ? parts.join(" / ") : "—";
+};
+
+const ShiftTimeReportModal = ({ onClose }) => {
+  const toast = useAlert() || toastify;
+  const { data: machines = [] } = useMachines();
+  const [from, setFrom] = useState(startOfMonth());
+  const [to, setTo] = useState(today());
+  const [machine, setMachine] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [rows, setRows] = useState([]);
+
+  const load = () => {
+    setLoading(true);
+    const params = { from, to };
+    if (machine) params.machine = machine;
+    getShiftTimeReport(params)
+      .then((res) => setRows(res.data?.data || []))
+      .catch(() => toast.error?.("Failed to load shift time report"))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative flex flex-col w-full max-w-5xl h-[88vh] max-h-[88vh] bg-white dark:bg-[#1a1a1a] rounded-2xl shadow-xl border border-slate-300 dark:border-slate-700">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-700 shrink-0 rounded-t-2xl">
+          <div className="flex items-center gap-2">
+            <Clock className="w-5 h-5 text-brand-600" />
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">Shift Time Report</h2>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1 flex flex-col min-h-0">
+          <div className="flex flex-wrap items-end gap-3 shrink-0">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Start Date</label>
+              <DatePicker name="stFrom" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="Start date" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">End Date</label>
+              <DatePicker name="stTo" value={to} onChange={(e) => setTo(e.target.value)} placeholder="End date" />
+            </div>
+            <div className="w-full sm:w-56">
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Machine</label>
+              <select
+                value={machine}
+                onChange={(e) => setMachine(e.target.value)}
+                className="w-full border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white dark:bg-[#1a1a1a]"
+              >
+                <option value="">All Machines</option>
+                {machines.map((m) => <option key={m._id} value={m._id}>{m.machineName}</option>)}
+              </select>
+            </div>
+            <button
+              onClick={load}
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors disabled:opacity-60"
+            >
+              {loading ? "Loading…" : "Apply Filter"}
+            </button>
+          </div>
+
+          <div className="bg-white dark:bg-[#1a1a1a] rounded-2xl border border-slate-300 dark:border-slate-700 shadow-sm overflow-hidden flex-1 flex flex-col min-h-0">
+            <div className="overflow-auto flex-1 min-h-0">
+              <table className="w-full text-xs sm:text-sm border-separate border-spacing-0">
+                <thead>
+                  <tr className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-left">
+                    {["Machine", "Shift", "Shift Start", "Shift End", "M/C On", "M/C Off", "Overtime", "Start Delay / Early Closed"].map((h, i, arr) => (
+                      <th key={h} className={`sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-b border-slate-300 dark:border-slate-700 ${i < arr.length - 1 ? "border-r" : ""}`}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading && (
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-medium">Loading…</td></tr>
+                  )}
+                  {!loading && rows.length === 0 && (
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-medium">No entries match this filter.</td></tr>
+                  )}
+                  {!loading && rows.map((r, i) => (
+                    <tr key={r._id} className={`border-b border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors ${i % 2 === 1 ? "bg-slate-50/70 dark:bg-slate-800/20" : "bg-white dark:bg-transparent"}`}>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-medium">{r.machineName}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{r.shiftName}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.shiftOnTime || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.shiftOffTime || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.mcStartTime || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.mcOffTime || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmtMin(r.overtimeMin)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{fmtDelayOrEarly(r.startDelayMin, r.earlyClosedMin)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </div>,
@@ -497,6 +698,7 @@ const GrindingEntry = () => {
   const { data: machines = [] } = useMachines();
   const { data: processes = [] } = useProcesses();
   const { data: operators = [] } = useOperators();
+  const { data: shifts = [] } = useShifts();
 
   const [activeMachine, setActiveMachine] = useState("");
   const [sheetSearch, setSheetSearch] = useState("");
@@ -515,6 +717,7 @@ const GrindingEntry = () => {
   const [openFormula, setOpenFormula] = useState(null); // { key, label, formula, rect } | null
   const [openRemark, setOpenRemark] = useState(null); // { id, text, rect } | null
   const [showEfficiency, setShowEfficiency] = useState(false);
+  const [showShiftTimeReport, setShowShiftTimeReport] = useState(false);
 
   const [editId, setEditId] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
@@ -603,9 +806,17 @@ const GrindingEntry = () => {
     );
   }, [machines, formProcess]);
 
+  // Selecting a Process auto-applies that process's own default Shift
+  // (configured in Process Master) — Shift On/Off Time and M/C Start/Off
+  // Time populate immediately, exactly like picking a Shift directly does,
+  // so the operator doesn't have to separately hunt down the Shift dropdown.
+  // Only fills in a Shift that isn't already chosen — never overwrites a
+  // Shift the operator already picked by hand.
   const handleProcessSelect = (e) => {
     const val = e.target.value;
     setFormProcess(val);
+    const proc = processes.find((p) => p._id === val);
+    const procShift = proc?.shift && typeof proc.shift === "object" ? proc.shift : null;
     setValues((prev) => ({
       ...prev,
       machine: "",
@@ -613,6 +824,15 @@ const GrindingEntry = () => {
       sizeHeightMm: "",
       thicknessMm: "",
       standardTimePerPieceMin: "",
+      ...(procShift && !prev.shift
+        ? {
+            shift: procShift._id,
+            shiftOnTime: procShift.shiftOnTime,
+            shiftOffTime: procShift.shiftOffTime,
+            mcStartTime: prev.mcStartTime || procShift.shiftOnTime,
+            mcOffTime: prev.mcOffTime || procShift.shiftOffTime,
+          }
+        : {}),
     }));
     setStdTimes([]);
   };
@@ -775,6 +995,9 @@ const GrindingEntry = () => {
       mcOffTime: e.mcOffTime || "",
       machine: typeof e.machine === "object" ? e.machine._id : e.machine,
       operator: e.operator?._id || "",
+      shift: typeof e.shift === "object" ? e.shift?._id || "" : e.shift || "",
+      shiftOnTime: typeof e.shift === "object" ? e.shift?.shiftOnTime || "" : "",
+      shiftOffTime: typeof e.shift === "object" ? e.shift?.shiftOffTime || "" : "",
       sizeWidthMm: e.sizeWidthMm || "",
       sizeHeightMm: e.sizeHeightMm || "",
       thicknessMm: e.thicknessMm || "",
@@ -830,6 +1053,26 @@ const GrindingEntry = () => {
     }
   };
 
+  // Selecting a Shift populates the read-only Shift On/Off Time blocks shown
+  // in the form (Overtime is derived from these, not entered manually), and
+  // also defaults M/C Start/Off Time to the shift's own schedule so nothing
+  // needs to be typed by hand for a normal on-time shift — still editable,
+  // since capturing the actual variance (early start, late finish, etc.) is
+  // exactly what feeds Overtime/Start Delay/Early Closed. Only pre-fills
+  // fields that are still empty — never overwrites a value already entered.
+  const handleShiftChange = (e) => {
+    const id = e.target.value;
+    const s = shifts.find((sh) => sh._id === id);
+    setValues((prev) => ({
+      ...prev,
+      shift: id,
+      shiftOnTime: s?.shiftOnTime || "",
+      shiftOffTime: s?.shiftOffTime || "",
+      mcStartTime: prev.mcStartTime || s?.shiftOnTime || "",
+      mcOffTime: prev.mcOffTime || s?.shiftOffTime || "",
+    }));
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
     const errors = validate({ ...values, process: formProcess });
@@ -872,6 +1115,10 @@ const GrindingEntry = () => {
           <h1 className="text-lg font-semibold text-slate-900">Grinding Data Entry</h1>
         </div>
         <div className="flex items-center gap-3 w-full sm:w-auto">
+          <button onClick={() => setShowShiftTimeReport(true)}
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+            <Clock className="w-4 h-4" /> Shift Time Report
+          </button>
           <button onClick={() => setShowEfficiency(true)}
             className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
             <Gauge className="w-4 h-4" /> Efficiency
@@ -963,6 +1210,13 @@ const GrindingEntry = () => {
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Operator</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">M/C Start</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">M/C Off</th>
+              <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Shift On</th>
+              <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Shift Off</th>
+
+              {/* Overtime / Start Delay / Early Closed (calculated, derived from Shift On/Off vs. M/C Start/Off) */}
+              <CalcHeader label="Overtime" formula={OVERTIME_FORMULA} colKey="overtimeMin" openKey={openFormula?.key} onToggle={toggleFormula} sticky="sticky top-0" extraClass="border-b" />
+              <CalcHeader label="Start Delay / Early Closed" formula={DELAY_EARLY_FORMULA} colKey="startDelayEarlyClosed" openKey={openFormula?.key} onToggle={toggleFormula} sticky="sticky top-0" extraClass="border-b" />
+
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Size (mm)</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Thickness</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Std. Time (min)</th>
@@ -1010,7 +1264,7 @@ const GrindingEntry = () => {
           </thead>
           <tbody>
             {filteredEntries.length === 0 && (
-              <tr><td colSpan={10 + STOPPAGE_FIELDS.length + 1 + 5 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
+              <tr><td colSpan={14 + STOPPAGE_FIELDS.length + 1 + 5 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
                 {loadingSheet ? "Loading…" : sheetSearch ? "No entries match your search." : "No entries for this machine yet."}
               </td></tr>
             )}
@@ -1025,6 +1279,13 @@ const GrindingEntry = () => {
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.operator?.name || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcStartTime || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcOffTime || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shift?.shiftOnTime || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shift?.shiftOffTime || "—"}</td>
+
+                {/* Overtime / Start Delay / Early Closed */}
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtMin(c.overtimeMin)}</td>
+                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtDelayOrEarly(c.startDelayMin, c.earlyClosedMin)}</td>
+
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.sizeWidthMm}×{e.sizeHeightMm}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.thicknessMm} mm</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmt(e.standardTimePerPieceMin, "min")}</td>
@@ -1218,12 +1479,29 @@ const GrindingEntry = () => {
                     {err("mcOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("mcOffTime")}</p>}
                   </div>
 
-                  {/* Overtime */}
+                  {/* Shift — selecting one populates the read-only On/Off Time
+                      blocks below; Overtime/Start Delay/Early Closed are
+                      derived from these vs. M/C Start/Off Time, not entered
+                      manually. */}
                   <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Overtime (Minutes)</label>
-                    <input type="number" name="overtimeMin" value={values.overtimeMin} onChange={handleChange} onWheel={(e) => e.target.blur()} ref={noWheelChange}
-                      min={0} max={1440} step={1} className={cls(err("overtimeMin"))} />
-                    {err("overtimeMin") && <p className="text-[10px] text-red-500 mt-0.5">{err("overtimeMin")}</p>}
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Shift <span className="text-red-500">*</span></label>
+                    <select name="shift" value={values.shift} onChange={handleShiftChange} className={cls(err("shift"))}>
+                      <option value="">Select Shift</option>
+                      {shifts.map((s) => <option key={s._id} value={s._id}>{s.shiftName}</option>)}
+                    </select>
+                    {err("shift") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("shift")}</p>}
+                  </div>
+
+                  {/* Ongoing Shift On/Off Time — read-only, from the selected Shift */}
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Shift On Time</label>
+                    <input type="text" readOnly value={values.shiftOnTime || "—"}
+                      className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default font-mono" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Shift Off Time</label>
+                    <input type="text" readOnly value={values.shiftOffTime || "—"}
+                      className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default font-mono" />
                   </div>
 
                 </div>
@@ -1379,7 +1657,7 @@ const GrindingEntry = () => {
                       {f.key === "othersMin" && (
                         <div className="sm:col-span-2">
                           <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                            Others — Remark {Number(values.othersMin) > 0 && <span className="text-red-500">*</span>}
+                            Remarks {Number(values.othersMin) > 0 && <span className="text-red-500">*</span>}
                           </label>
                           <textarea
                             name="othersRemark"
@@ -1424,6 +1702,7 @@ const GrindingEntry = () => {
         handleDelete={handleDelete} disabled={isDeleteLoading} />
 
       {showEfficiency && <EfficiencyModal onClose={() => setShowEfficiency(false)} />}
+      {showShiftTimeReport && <ShiftTimeReportModal onClose={() => setShowShiftTimeReport(false)} />}
     </div>
   );
 };

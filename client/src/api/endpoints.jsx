@@ -66,6 +66,15 @@ export const ENDPOINTS = {
         BASE: `${V1}/production-entries`,
         BY_ID: (id) => `${V1}/production-entries/${id}`,
         EFFICIENCY: `${V1}/production-entries/efficiency`,
+        EFFICIENCY_PDF: `${V1}/production-entries/efficiency/pdf`,
+        SHIFT_TIME_REPORT: `${V1}/production-entries/shift-time-report`,
+    },
+
+    // Shift Master endpoints
+    SHIFTS: {
+        BASE: `${V1}/shifts`,
+        BY_ID: (id) => `${V1}/shifts/${id}`,
+        SEARCH: `${V1}/shifts/search`,
     },
 
     // Operator Master endpoints
@@ -118,12 +127,6 @@ export const ENDPOINTS = {
         BASE: `${V1}/menu-groups`,
         BY_ID: (id) => `${V1}/menu-groups/${id}`,
         SEARCH: `${V1}/menu-groups/search`,
-    },
-
-    // Hierarchy (org-chart canvas)
-    HIERARCHY: {
-        BASE: `${V1}/hierarchy`,
-        MY_SCOPE: `${V1}/hierarchy/my-scope`,
     },
 };
 

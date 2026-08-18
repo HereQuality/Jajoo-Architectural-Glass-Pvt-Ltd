@@ -30,6 +30,21 @@ export const listProductionEntries = async (params = {}) =>
 export const getProductionEfficiency = async (params = {}) =>
     api.get(ENDPOINTS.PRODUCTION_ENTRIES.EFFICIENCY, { params });
 
+/**
+ * Server-generated PDF of the Grinding Efficiency Report.
+ * @param {Object} params - { from, to, tab, operator?, match? }
+ */
+export const downloadGrindingEfficiencyPdf = async (params = {}) =>
+    api.get(ENDPOINTS.PRODUCTION_ENTRIES.EFFICIENCY_PDF, { params, responseType: "blob" });
+
+/**
+ * Shift Time Report — Machine, Shift Start/End, M/C On/Off, Overtime,
+ * Start Delay / Early Closed for every entry in a date range.
+ * @param {Object} params - { from, to, machine? }
+ */
+export const getShiftTimeReport = async (params = {}) =>
+    api.get(ENDPOINTS.PRODUCTION_ENTRIES.SHIFT_TIME_REPORT, { params });
+
 export default {
     createProductionEntry,
     updateProductionEntry,
@@ -37,4 +52,6 @@ export default {
     getProductionEntryById,
     listProductionEntries,
     getProductionEfficiency,
+    downloadGrindingEfficiencyPdf,
+    getShiftTimeReport,
 };

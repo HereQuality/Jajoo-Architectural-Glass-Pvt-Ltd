@@ -1,21 +1,23 @@
 const ProductionEntry = require("../models/ProductionEntry");
 const Machine = require("../models/Machine");
+const Shift = require("../models/Shift");
 const { computeCalculations } = require("../services/productionCalculation.service");
 const { resolveMachineFilter } = require("../utils/entryQuery");
 const { aggregateEfficiencyByGroup } = require("../utils/efficiencyAggregate");
+const { buildGrindingEfficiencyPdf } = require("../services/report.service");
 
 const NUMERIC_FIELDS = [
   "sizeWidthMm", "sizeHeightMm",
   "processQty", "okQty",
   "standardTimePerPieceMin",
-  "plannedDowntimeMin", "overtimeMin",
+  "plannedDowntimeMin",
   "noManpowerMin", "mechanicalBreakdownMin", "electricalBreakdownMin",
   "rawMaterialNotAvailableMin", "humanErrorStoppageMin", "changeoverMin",
   "rawMaterialProblemMin", "noPowerMin", "othersMin",
 ];
 
 const OPTIONAL_MIN_FIELDS = [
-  "plannedDowntimeMin", "overtimeMin",
+  "plannedDowntimeMin",
   "noManpowerMin", "mechanicalBreakdownMin", "electricalBreakdownMin",
   "rawMaterialNotAvailableMin", "humanErrorStoppageMin", "changeoverMin",
   "rawMaterialProblemMin", "noPowerMin", "othersMin",
@@ -29,6 +31,13 @@ async function validatePayload(body) {
     const m = await Machine.findById(body.machine);
     if (!m) errors.machine = "Selected machine does not exist";
     else if (!m.isActive) errors.machine = "Selected machine is inactive";
+  }
+
+  if (!body.shift) errors.shift = "Shift is required";
+  else {
+    const s = await Shift.findById(body.shift);
+    if (!s) errors.shift = "Selected shift does not exist";
+    else if (!s.isActive) errors.shift = "Selected shift is inactive";
   }
 
   if (!body.date) errors.date = "Date is required";
@@ -89,6 +98,7 @@ function buildData(body) {
   const data = {
     machine: body.machine,
     operator: body.operator || undefined,
+    shift: body.shift,
     date: body.date || Date.now(),
     mcStartTime: body.mcStartTime,
     mcOffTime: body.mcOffTime,
@@ -124,6 +134,20 @@ function capacityError(data) {
   return null;
 }
 
+// Fetches shiftOnTime/shiftOffTime for the given shift id and folds them
+// (plus the derived Overtime/Start Delay/Early Closed) into `data` so
+// computeCalculations() has everything it needs, and so the persisted
+// `overtimeMin` field always matches what was actually computed.
+async function applyShiftCalculations(data) {
+  const shift = await Shift.findById(data.shift);
+  data.calculated = computeCalculations({
+    ...data,
+    shiftOnTime: shift?.shiftOnTime,
+    shiftOffTime: shift?.shiftOffTime,
+  });
+  data.overtimeMin = data.calculated.overtimeMin;
+}
+
 exports.createProductionEntry = async (req, res) => {
   try {
     const errors = await validatePayload(req.body);
@@ -131,7 +155,7 @@ exports.createProductionEntry = async (req, res) => {
       return res.status(400).json({ isOk: false, errors, message: "Please fix the highlighted fields" });
 
     const data = buildData(req.body);
-    data.calculated = computeCalculations(data);
+    await applyShiftCalculations(data);
     const capacityMsg = capacityError(data);
     if (capacityMsg) {
       return res.status(400).json({ isOk: false, errors: { processQty: capacityMsg }, message: capacityMsg });
@@ -143,7 +167,8 @@ exports.createProductionEntry = async (req, res) => {
     const entry = await ProductionEntry.create(data);
     const populated = await entry.populate([
       { path: "machine", select: "machineName machineCode" },
-      { path: "operator", select: "name" }
+      { path: "operator", select: "name" },
+      { path: "shift", select: "shiftName shiftOnTime shiftOffTime" },
     ]);
     res.status(201).json({ isOk: true, data: populated, message: "Entry saved successfully" });
   } catch (err) {
@@ -160,7 +185,7 @@ exports.updateProductionEntry = async (req, res) => {
       return res.status(400).json({ isOk: false, errors, message: "Please fix the highlighted fields" });
 
     const data = buildData(req.body);
-    data.calculated = computeCalculations(data);
+    await applyShiftCalculations(data);
     const capacityMsg = capacityError(data);
     if (capacityMsg) {
       return res.status(400).json({ isOk: false, errors: { processQty: capacityMsg }, message: capacityMsg });
@@ -168,7 +193,8 @@ exports.updateProductionEntry = async (req, res) => {
 
     const entry = await ProductionEntry.findOneAndUpdate({ _id: entryId }, data, {
       new: true, runValidators: true,
-    }).populate("machine", "machineName machineCode").populate("operator", "name");
+    }).populate("machine", "machineName machineCode").populate("operator", "name")
+      .populate("shift", "shiftName shiftOnTime shiftOffTime");
 
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
     res.status(200).json({ isOk: true, data: entry, message: "Entry updated successfully" });
@@ -192,7 +218,8 @@ exports.deleteProductionEntry = async (req, res) => {
 exports.getProductionEntryById = async (req, res) => {
   try {
     const entry = await ProductionEntry.findById(req.params.entryId)
-      .populate("machine", "machineName machineCode").populate("operator", "name");
+      .populate("machine", "machineName machineCode").populate("operator", "name")
+      .populate("shift", "shiftName shiftOnTime shiftOffTime");
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
     res.status(200).json({ isOk: true, data: entry });
   } catch (err) {
@@ -237,6 +264,68 @@ exports.getProductionEfficiency = async (req, res) => {
   }
 };
 
+// Server-generated PDF of the Grinding Efficiency Report — mirrors
+// getProductionEfficiency's aggregation exactly, then applies the same
+// operator (exact match) / machine (substring match) filter the on-screen
+// EfficiencyModal applies, so the PDF always matches what's currently shown.
+exports.downloadGrindingEfficiencyPdf = async (req, res) => {
+  try {
+    const { from, to, tab = "machines", operator, match } = req.query;
+    const query = {};
+    if (from || to) {
+      query.date = {};
+      if (from) query.date.$gte = new Date(from);
+      if (to) query.date.$lte = new Date(to);
+    }
+
+    const entries = await ProductionEntry.find(query)
+      .populate("machine", "machineName")
+      .populate("operator", "name")
+      .lean();
+
+    let rows = tab === "operators"
+      ? aggregateEfficiencyByGroup(
+          entries,
+          (e) => (e.operator?._id ? String(e.operator._id) : null),
+          (e) => e.operator?.name || "Unknown Operator",
+        )
+      : aggregateEfficiencyByGroup(
+          entries,
+          (e) => (e.machine?._id ? String(e.machine._id) : null),
+          (e) => e.machine?.machineName || "Unknown Machine",
+        );
+
+    let filterDescription;
+    if (tab === "operators" && operator) {
+      const wanted = new Set(String(operator).split(",").map((s) => s.trim()).filter(Boolean));
+      rows = rows.filter((r) => wanted.has(r.name));
+      filterDescription = `Operator(s): ${[...wanted].join(", ")}`;
+    } else if (tab !== "operators" && match) {
+      const q = String(match).toLowerCase();
+      rows = rows.filter((r) => r.name.toLowerCase().includes(q));
+      filterDescription = `Machine search: "${match}"`;
+    }
+
+    const today = new Date().toISOString().split("T")[0];
+    const fromDate = from || today;
+    const toDate = to || fromDate;
+
+    const doc = buildGrindingEfficiencyPdf({ tab, rows, from: fromDate, to: toDate, filterDescription });
+
+    const filename = `grinding-${tab === "operators" ? "operator" : "machine"}-efficiency_${fromDate}${
+      toDate !== fromDate ? `_to_${toDate}` : ""
+    }.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    doc.pipe(res);
+    doc.end();
+  } catch (err) {
+    console.error("Error generating grinding efficiency PDF:", err);
+    res.status(500).json({ isOk: false, message: err.message });
+  }
+};
+
 exports.listProductionEntries = async (req, res) => {
   try {
     const { machine, process, from, to, skip = 0, per_page = 50 } = req.query;
@@ -252,12 +341,55 @@ exports.listProductionEntries = async (req, res) => {
       ProductionEntry.countDocuments(query),
       ProductionEntry.find(query)
         .populate("machine", "machineName machineCode").populate("operator", "name")
+        .populate("shift", "shiftName shiftOnTime shiftOffTime")
         .sort({ date: -1, createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(per_page))
         .lean(),
     ]);
     res.status(200).json({ isOk: true, data: entries, count });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ isOk: false, message: err.message });
+  }
+};
+
+// Shift Time Report — one row per entry: Machine, Shift Start/End, M/C
+// On/Off, Overtime, Start Delay / Early Closed (all already stored on the
+// entry — Overtime/Start Delay/Early Closed are computed once at save time
+// by applyShiftCalculations, so this is a straight read, no recomputation).
+exports.getShiftTimeReport = async (req, res) => {
+  try {
+    const { from, to, machine } = req.query;
+    const query = {};
+    if (machine) query.machine = machine;
+    if (from || to) {
+      query.date = {};
+      if (from) query.date.$gte = new Date(from);
+      if (to) query.date.$lte = new Date(to);
+    }
+
+    const entries = await ProductionEntry.find(query)
+      .populate("machine", "machineName machineCode")
+      .populate("shift", "shiftName shiftOnTime shiftOffTime")
+      .sort({ date: -1, mcStartTime: -1 })
+      .lean();
+
+    const rows = entries.map((e) => ({
+      _id: e._id,
+      date: e.date,
+      machineName: e.machine?.machineName || "Unknown Machine",
+      shiftName: e.shift?.shiftName || "—",
+      shiftOnTime: e.shift?.shiftOnTime || null,
+      shiftOffTime: e.shift?.shiftOffTime || null,
+      mcStartTime: e.mcStartTime,
+      mcOffTime: e.mcOffTime,
+      overtimeMin: e.calculated?.overtimeMin ?? e.overtimeMin ?? 0,
+      startDelayMin: e.calculated?.startDelayMin ?? 0,
+      earlyClosedMin: e.calculated?.earlyClosedMin ?? 0,
+    }));
+
+    res.status(200).json({ isOk: true, data: rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ isOk: false, message: err.message });

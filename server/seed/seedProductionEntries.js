@@ -9,20 +9,30 @@
  * StandardTime records once those synthetic machines were deleted).
  *
  * What it does, in order:
- *   1. Wipes ALL StandardTime records and inserts 2-3 realistic ones per
+ *   1. Upserts the real "General Shift" (09:00–18:00) by name — never
+ *      deleted/recreated, so its _id (and any entries referencing it)
+ *      stays stable across re-runs.
+ *   2. Wipes ALL StandardTime records and inserts 2-3 realistic ones per
  *      active Grinding machine (sane sizes/thicknesses/times — replacing
  *      whatever placeholder/test values existed before).
- *   2. Wipes ALL ProductionEntry records and inserts exactly ONE entry
+ *   3. Wipes ALL ProductionEntry records and inserts exactly ONE entry
  *      per active Grinding machine per day, for the last 14 days
  *      (including today) — so the Dashboard's Daily OEE Trend has a
  *      clean, realistic multi-day history instead of a jumble of
- *      multiple/duplicate same-day entries.
+ *      multiple/duplicate same-day entries. M/C Start/Off Time is jittered
+ *      around the shift's own schedule so Overtime/Start Delay/Early
+ *      Closed (all derived, never manual) show a realistic mix.
  *
- * Safe to re-run — it always starts from a clean slate (steps above),
- * so re-running just regenerates the same shape of data with fresh
- * pseudo-random (but deterministic) numbers for the current date range.
+ * SAFETY GUARD: this script wipes ALL StandardTime and ALL ProductionEntry
+ * records before regenerating them. That is only safe on a fresh/dev
+ * database with no real entries yet. Before touching anything, `run()`
+ * checks for any ProductionEntry that ISN'T tagged with SEED_TAG (i.e. a
+ * real, client-entered row) and ABORTS immediately if it finds one —
+ * refusing to run rather than silently deleting real production data.
+ * Pass --force to bypass this check (only ever do that on a database you
+ * know is safe to wipe, e.g. a scratch/dev environment).
  *
- * Usage: node server/seed/seedProductionEntries.js
+ * Usage: node server/seed/seedProductionEntries.js [--force]
  */
 
 const path = require("path");
@@ -33,6 +43,7 @@ const connectDB = require("../config/db");
 const Machine = require("../models/Machine");
 const Operator = require("../models/Operator");
 const Process = require("../models/Process");
+const Shift = require("../models/Shift");
 const StandardTime = require("../models/StandardTime");
 const ProductionEntry = require("../models/ProductionEntry");
 const { computeCalculations } = require("../services/productionCalculation.service");
@@ -87,16 +98,33 @@ const STANDARD_TIME_TEMPLATES = [
   ],
 ];
 
-const SHIFTS = [
-  { mcStartTime: "09:00", mcOffTime: "18:00" }, // 540 min
-  { mcStartTime: "08:00", mcOffTime: "20:00" }, // 720 min
-  { mcStartTime: "21:00", mcOffTime: "06:00" }, // overnight, 540 min
-];
-
 function dateNDaysAgo(n) {
   const d = new Date();
   d.setDate(d.getDate() - n);
   return d.toISOString().split("T")[0];
+}
+
+// Real Jajoo Glass shift — upserted (never deleted/recreated) so its _id
+// stays stable across re-runs, same as seedMenus.js's approach for menus.
+async function seedShift() {
+  return Shift.findOneAndUpdate(
+    { shiftName: "General Shift" },
+    { shiftName: "General Shift", shiftOnTime: "09:00", shiftOffTime: "18:00", isActive: true },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
+
+// Jitters an "HH:mm" time by a random offset (minutes, may be negative),
+// wrapping around midnight — used to give M/C Start/Off Time realistic
+// variance around the shift's own On/Off Time, so the Shift Time Report
+// actually shows a mix of on-time / delayed-start / early-close / overtime
+// entries instead of every row being identical to the shift schedule.
+function jitterTime(base, minDelta, maxDelta) {
+  const [h, m] = base.split(":").map(Number);
+  let total = ((h * 60 + m + int(minDelta, maxDelta)) % 1440 + 1440) % 1440;
+  const hh = String(Math.floor(total / 60)).padStart(2, "0");
+  const mm = String(total % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
 }
 
 async function seedStandardTimes(machines) {
@@ -112,7 +140,7 @@ async function seedStandardTimes(machines) {
   console.log(`Seeded ${created.length} Standard Time records (${STANDARD_TIME_TEMPLATES[0].length} per machine × ${machines.length} machines).`);
 }
 
-async function seedProductionEntries(machines, operators) {
+async function seedProductionEntries(machines, operators, shift) {
   await ProductionEntry.deleteMany({});
 
   const stByMachine = new Map();
@@ -129,7 +157,6 @@ async function seedProductionEntries(machines, operators) {
       if (!sts || sts.length === 0) continue;
 
       const st = pick(sts);
-      const shift = pick(SHIFTS);
       const operator = pick(operators);
 
       const plannedDowntimeMin = int(0, 30);
@@ -142,19 +169,28 @@ async function seedProductionEntries(machines, operators) {
       const rawMaterialProblemMin = int(0, 10);
       const noPowerMin = int(0, 5);
       const othersMin = 0;
-      const overtimeMin = rand() < 0.15 ? int(15, 60) : 0;
+
+      // M/C Start/Off Time varies around the shift's own schedule — most
+      // days close to on-time, some days early-start/late-finish
+      // (overtime), some days late-start/early-close (delay/early closed) —
+      // so the Shift Time Report has a realistic mix to show, not identical
+      // rows. Overtime/Start Delay/Early Closed are NOT set manually here;
+      // they're derived below by computeCalculations, exactly as the real
+      // app derives them from `shift` vs. mcStartTime/mcOffTime.
+      const mcStartTime = jitterTime(shift.shiftOnTime, -15, 20);
+      const mcOffTime = jitterTime(shift.shiftOffTime, -20, 15);
 
       const entry = {
         date: new Date(dateStr),
-        mcStartTime: shift.mcStartTime,
-        mcOffTime: shift.mcOffTime,
+        mcStartTime,
+        mcOffTime,
         machine: machine._id,
         operator: operator._id,
+        shift: shift._id,
         sizeWidthMm: st.sizeWidthMm,
         sizeHeightMm: st.sizeHeightMm,
         thicknessMm: st.thicknessMm,
         standardTimePerPieceMin: st.standardTimeMin,
-        overtimeMin,
         plannedDowntimeMin,
         noManpowerMin,
         mechanicalBreakdownMin,
@@ -168,7 +204,11 @@ async function seedProductionEntries(machines, operators) {
         othersRemark: SEED_TAG,
       };
 
-      const calculated = computeCalculations(entry);
+      // computeCalculations reads shiftOnTime/shiftOffTime off the entry
+      // object (not `shift`, which is just the stored ref) — same contract
+      // as productionEntry.controller.js's applyShiftCalculations.
+      const calcInput = { ...entry, shiftOnTime: shift.shiftOnTime, shiftOffTime: shift.shiftOffTime };
+      const calculated = computeCalculations(calcInput);
       // Keep Process Qty comfortably inside what the shift can actually
       // produce (Ideal Production), same as the real form's own capacity
       // check would require — a realistic 75-95% of ideal, not more.
@@ -180,18 +220,31 @@ async function seedProductionEntries(machines, operators) {
       entry.processQty = processQty;
       entry.okQty = okQty;
       entry.rejectedQty = rejectedQty;
-      entry.calculated = computeCalculations(entry);
+      entry.calculated = computeCalculations({ ...entry, shiftOnTime: shift.shiftOnTime, shiftOffTime: shift.shiftOffTime });
+      entry.overtimeMin = entry.calculated.overtimeMin;
 
       docs.push(entry);
     }
   }
 
   await ProductionEntry.insertMany(docs);
-  console.log(`Seeded ${docs.length} production entries (${machines.length} machines × ${DAYS_BACK + 1} days, one entry per machine per day).`);
+  console.log(`Seeded ${docs.length} production entries (${machines.length} machines × ${DAYS_BACK + 1} days, one entry per machine per day, tied to "${shift.shiftName}").`);
 }
 
 async function run() {
   await connectDB();
+
+  const force = process.argv.includes("--force");
+  const realEntryCount = await ProductionEntry.countDocuments({ othersRemark: { $ne: SEED_TAG } });
+  if (realEntryCount > 0 && !force) {
+    console.error(
+      `ABORTING: found ${realEntryCount} real (non-seed-tagged) ProductionEntry record(s) — ` +
+      `this script wipes ALL entries and would destroy them. Re-run with --force only if you ` +
+      `are certain this database is safe to wipe.`,
+    );
+    await mongoose.connection.close();
+    process.exit(1);
+  }
 
   const grinding = await Process.findOne({ processName: "Grinding" });
   if (!grinding) {
@@ -210,8 +263,11 @@ async function run() {
 
   console.log(`Using ${machines.length} real active Grinding machines and ${operators.length} real active operators.`);
 
+  const shift = await seedShift();
+  console.log(`Using shift "${shift.shiftName}" (${shift.shiftOnTime}–${shift.shiftOffTime}).`);
+
   await seedStandardTimes(machines);
-  await seedProductionEntries(machines, operators);
+  await seedProductionEntries(machines, operators, shift);
 
   console.log("Done.");
   await mongoose.connection.close();

@@ -39,6 +39,7 @@ const productionEntryRoutes = require("./productionEntry.routes");
 const operatorRoutes = require("./operator.routes");
 const standardTimeRoutes = require("./standardTime.routes");
 const reportRoutes = require("./report.routes");
+const shiftRoutes = require("./shift.routes");
 // const inventoryRoutes = require("./inventory.routes");
 
 // ── Mount routes ─────────────────────────────────────────────────────────────
@@ -59,6 +60,7 @@ router.use("/production-entries", productionEntryRoutes);
 router.use("/operators", operatorRoutes);
 router.use("/standard-times", standardTimeRoutes);
 router.use("/reports", reportRoutes);
+router.use("/shifts", shiftRoutes);
 // router.use("/inventory", inventoryRoutes);
 
 // ── API Info endpoint ─────────────────────────────────────────────────────────

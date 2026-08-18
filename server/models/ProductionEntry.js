@@ -4,12 +4,16 @@ const mongoose = require("mongoose");
  * Production Data Entry — Glass Grinding
  *
  * Required fields:
- *   machine, date, mcStartTime, mcOffTime,
+ *   machine, shift, date, mcStartTime, mcOffTime,
  *   sizeWidthMm, sizeHeightMm, thicknessMm,
  *   processQty, okQty, rejectedQty, standardTimePerPieceMin
  *
+ * Overtime is not entered manually — it (along with Start Delay / Early
+ * Closed) is derived server-side from `shift` (shiftOnTime/shiftOffTime)
+ * vs. mcStartTime/mcOffTime. See productionCalculation.service.js.
+ *
  * Optional stoppage / downtime fields (default 0, max 1440 min):
- *   plannedDowntimeMin, overtimeMin,
+ *   plannedDowntimeMin, overtimeMin (auto-derived, see above),
  *   noManpowerMin, mechanicalBreakdownMin, electricalBreakdownMin,
  *   rawMaterialNotAvailableMin, humanErrorStoppageMin, changeoverMin,
  *   rawMaterialProblemMin, noPowerMin, othersMin
@@ -27,6 +31,11 @@ const ProductionEntrySchema = new mongoose.Schema(
     operator: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Operator",
+    },
+    shift: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Shift",
+      required: [true, "Shift is required"],
     },
     date: {
       type: Date,
@@ -117,6 +126,9 @@ const ProductionEntrySchema = new mongoose.Schema(
       performanceRatio:      { type: Number, default: 0 },
       qualityRatio:          { type: Number, default: 0 },
       oeePercent:            { type: Number, default: 0 },
+      overtimeMin:           { type: Number, default: 0 },
+      startDelayMin:         { type: Number, default: 0 },
+      earlyClosedMin:        { type: Number, default: 0 },
     },
 
     createdBy: {
