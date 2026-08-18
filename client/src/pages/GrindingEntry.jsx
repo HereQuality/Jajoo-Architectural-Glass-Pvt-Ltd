@@ -999,8 +999,13 @@ const GrindingEntry = () => {
       mcOffTime: e.mcOffTime || "",
       machine: machineId,
       operator: e.operator?._id || "",
-      shiftOnTime: machineObj?.machineOnTime || "",
-      shiftOffTime: machineObj?.machineOffTime || "",
+      // The entry's own snapshot, not the machine's current config — if
+      // the machine's Shift Time was changed since this entry was saved,
+      // editing an unrelated field here must not silently pull in the new
+      // schedule. Only falls back to the machine's live config for legacy
+      // entries saved before snapshotting existed.
+      shiftOnTime: e.shiftOnTime || machineObj?.machineOnTime || "",
+      shiftOffTime: e.shiftOffTime || machineObj?.machineOffTime || "",
       sizeWidthMm: e.sizeWidthMm || "",
       sizeHeightMm: e.sizeHeightMm || "",
       thicknessMm: e.thicknessMm || "",
@@ -1273,8 +1278,8 @@ const GrindingEntry = () => {
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.operator?.name || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcStartTime || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcOffTime || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{(typeof e.machine === "object" ? e.machine?.machineOnTime : null) || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{(typeof e.machine === "object" ? e.machine?.machineOffTime : null) || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shiftOnTime || (typeof e.machine === "object" ? e.machine?.machineOnTime : null) || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shiftOffTime || (typeof e.machine === "object" ? e.machine?.machineOffTime : null) || "—"}</td>
 
                 {/* Overtime / Start Delay / Early Closed */}
                 <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtMin(c.overtimeMin)}</td>

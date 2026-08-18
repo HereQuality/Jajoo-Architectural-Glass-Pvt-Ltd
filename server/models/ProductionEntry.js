@@ -9,9 +9,17 @@ const mongoose = require("mongoose");
  *   processQty, okQty, rejectedQty, standardTimePerPieceMin
  *
  * Overtime is not entered manually — it (along with Start Delay / Early
- * Closed) is derived server-side from the entry's Machine's own Shift Time
- * Start/End (machineOnTime/machineOffTime, set in Machine Master) vs.
+ * Closed) is derived server-side from `shiftOnTime`/`shiftOffTime` vs.
  * mcStartTime/mcOffTime. See productionCalculation.service.js.
+ * `shiftOnTime`/`shiftOffTime` are a SNAPSHOT of the entry's Machine's own
+ * Shift Time Start/End (machineOnTime/machineOffTime, set in Machine
+ * Master) taken when the Machine was selected on this entry's form — not
+ * re-derived from the machine's current config on every save. This is
+ * deliberate: if the machine's Shift Time is later changed in Machine
+ * Master (e.g. switched from Day to Night shift), already-saved entries
+ * must keep calculating against the window they actually ran under, even
+ * when later edited for an unrelated field (e.g. fixing OK Qty) — each
+ * entry works off its own snapshot, independently of the others.
  * `shift` is a legacy field — no longer set by the entry form, kept only
  * so entries saved before this change retain their original Shift link.
  *
@@ -58,6 +66,16 @@ const ProductionEntrySchema = new mongoose.Schema(
       type: String, // "HH:mm"
       required: [true, "M/C Off Time is required"],
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "M/C Off Time must be HH:mm"],
+    },
+    // Snapshot of the Machine's Shift Time Start/End at save time — see the
+    // file-level comment above for why this isn't re-derived on every save.
+    shiftOnTime: {
+      type: String, // "HH:mm"
+      match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Shift On Time must be HH:mm"],
+    },
+    shiftOffTime: {
+      type: String, // "HH:mm"
+      match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Shift Off Time must be HH:mm"],
     },
 
     // ── Size & thickness (from StandardTime master) ──────────────────────

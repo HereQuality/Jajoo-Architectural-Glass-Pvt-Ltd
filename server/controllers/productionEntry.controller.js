@@ -94,6 +94,8 @@ function buildData(body) {
     date: body.date || Date.now(),
     mcStartTime: body.mcStartTime,
     mcOffTime: body.mcOffTime,
+    shiftOnTime: body.shiftOnTime || undefined,
+    shiftOffTime: body.shiftOffTime || undefined,
     othersRemark: typeof body.othersRemark === "string" ? body.othersRemark.trim().slice(0, 300) : "",
   };
   for (const k of NUMERIC_FIELDS) {
@@ -126,18 +128,23 @@ function capacityError(data) {
   return null;
 }
 
-// Fetches the entry's own Machine's Shift Time Start/End
-// (machineOnTime/machineOffTime, set in Machine Master) and folds them in
-// as shiftOnTime/shiftOffTime (plus the derived Overtime/Start Delay/Early
-// Closed) into `data` so computeCalculations() has everything it needs, and
-// so the persisted `overtimeMin` field always matches what was computed.
+// Computes Overtime/Start Delay/Early Closed/Working Schedule Time from
+// `data.shiftOnTime`/`shiftOffTime` — the snapshot the client already took
+// of the Machine's Shift Time Start/End when it was selected on this entry
+// (see the ProductionEntry model comment for why this is a snapshot, not a
+// live re-fetch: so a Machine's Shift Time changing later never silently
+// alters an already-saved entry's numbers). Only falls back to the
+// machine's CURRENT Shift Time when the snapshot is missing entirely —
+// legacy/defensive path, not the normal one.
 async function applyShiftCalculations(data) {
-  const machine = await Machine.findById(data.machine);
-  data.calculated = computeCalculations({
-    ...data,
-    shiftOnTime: machine?.machineOnTime,
-    shiftOffTime: machine?.machineOffTime,
-  });
+  let shiftOnTime = data.shiftOnTime;
+  let shiftOffTime = data.shiftOffTime;
+  if (!shiftOnTime || !shiftOffTime) {
+    const machine = await Machine.findById(data.machine);
+    shiftOnTime = shiftOnTime || machine?.machineOnTime;
+    shiftOffTime = shiftOffTime || machine?.machineOffTime;
+  }
+  data.calculated = computeCalculations({ ...data, shiftOnTime, shiftOffTime });
   data.overtimeMin = data.calculated.overtimeMin;
 }
 
@@ -373,11 +380,13 @@ exports.getShiftTimeReport = async (req, res) => {
     // Time): earlier of Shift On/M-C Start, later of Shift Off/M-C Off.
     // "HH:mm" strings compare correctly with plain string min/max since
     // they're always zero-padded to the same width. Prefers the entry's own
-    // Machine's Shift Time Start/End (current source of truth); falls back
-    // to the legacy `shift` ref for entries saved before this change.
+    // shiftOnTime/shiftOffTime SNAPSHOT (what it actually ran under —
+    // doesn't drift if the machine's Shift Time is edited later); falls
+    // back to the machine's current config, then the legacy `shift` ref,
+    // only for entries saved before snapshotting existed.
     const rows = entries.map((e) => {
-      const shiftOnTime = e.machine?.machineOnTime || e.shift?.shiftOnTime || null;
-      const shiftOffTime = e.machine?.machineOffTime || e.shift?.shiftOffTime || null;
+      const shiftOnTime = e.shiftOnTime || e.machine?.machineOnTime || e.shift?.shiftOnTime || null;
+      const shiftOffTime = e.shiftOffTime || e.machine?.machineOffTime || e.shift?.shiftOffTime || null;
       const effectiveStartTime = shiftOnTime
         ? (e.mcStartTime < shiftOnTime ? e.mcStartTime : shiftOnTime)
         : e.mcStartTime;
