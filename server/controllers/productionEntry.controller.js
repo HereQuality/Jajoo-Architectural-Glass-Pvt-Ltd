@@ -1,6 +1,5 @@
 const ProductionEntry = require("../models/ProductionEntry");
 const Machine = require("../models/Machine");
-const Shift = require("../models/Shift");
 const { computeCalculations } = require("../services/productionCalculation.service");
 const { resolveMachineFilter } = require("../utils/entryQuery");
 const { aggregateEfficiencyByGroup } = require("../utils/efficiencyAggregate");
@@ -31,13 +30,6 @@ async function validatePayload(body) {
     const m = await Machine.findById(body.machine);
     if (!m) errors.machine = "Selected machine does not exist";
     else if (!m.isActive) errors.machine = "Selected machine is inactive";
-  }
-
-  if (!body.shift) errors.shift = "Shift is required";
-  else {
-    const s = await Shift.findById(body.shift);
-    if (!s) errors.shift = "Selected shift does not exist";
-    else if (!s.isActive) errors.shift = "Selected shift is inactive";
   }
 
   if (!body.date) errors.date = "Date is required";
@@ -134,16 +126,17 @@ function capacityError(data) {
   return null;
 }
 
-// Fetches shiftOnTime/shiftOffTime for the given shift id and folds them
-// (plus the derived Overtime/Start Delay/Early Closed) into `data` so
-// computeCalculations() has everything it needs, and so the persisted
-// `overtimeMin` field always matches what was actually computed.
+// Fetches the entry's own Machine's Shift Time Start/End
+// (machineOnTime/machineOffTime, set in Machine Master) and folds them in
+// as shiftOnTime/shiftOffTime (plus the derived Overtime/Start Delay/Early
+// Closed) into `data` so computeCalculations() has everything it needs, and
+// so the persisted `overtimeMin` field always matches what was computed.
 async function applyShiftCalculations(data) {
-  const shift = await Shift.findById(data.shift);
+  const machine = await Machine.findById(data.machine);
   data.calculated = computeCalculations({
     ...data,
-    shiftOnTime: shift?.shiftOnTime,
-    shiftOffTime: shift?.shiftOffTime,
+    shiftOnTime: machine?.machineOnTime,
+    shiftOffTime: machine?.machineOffTime,
   });
   data.overtimeMin = data.calculated.overtimeMin;
 }
@@ -166,7 +159,7 @@ exports.createProductionEntry = async (req, res) => {
     }
     const entry = await ProductionEntry.create(data);
     const populated = await entry.populate([
-      { path: "machine", select: "machineName machineCode" },
+      { path: "machine", select: "machineName machineCode machineOnTime machineOffTime" },
       { path: "operator", select: "name" },
       { path: "shift", select: "shiftName shiftOnTime shiftOffTime" },
     ]);
@@ -193,7 +186,7 @@ exports.updateProductionEntry = async (req, res) => {
 
     const entry = await ProductionEntry.findOneAndUpdate({ _id: entryId }, data, {
       new: true, runValidators: true,
-    }).populate("machine", "machineName machineCode").populate("operator", "name")
+    }).populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name")
       .populate("shift", "shiftName shiftOnTime shiftOffTime");
 
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
@@ -218,7 +211,7 @@ exports.deleteProductionEntry = async (req, res) => {
 exports.getProductionEntryById = async (req, res) => {
   try {
     const entry = await ProductionEntry.findById(req.params.entryId)
-      .populate("machine", "machineName machineCode").populate("operator", "name")
+      .populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name")
       .populate("shift", "shiftName shiftOnTime shiftOffTime");
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
     res.status(200).json({ isOk: true, data: entry });
@@ -340,7 +333,7 @@ exports.listProductionEntries = async (req, res) => {
     const [count, entries] = await Promise.all([
       ProductionEntry.countDocuments(query),
       ProductionEntry.find(query)
-        .populate("machine", "machineName machineCode").populate("operator", "name")
+        .populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name")
         .populate("shift", "shiftName shiftOnTime shiftOffTime")
         .sort({ date: -1, createdAt: -1 })
         .skip(parseInt(skip))
@@ -370,7 +363,7 @@ exports.getShiftTimeReport = async (req, res) => {
     }
 
     const entries = await ProductionEntry.find(query)
-      .populate("machine", "machineName machineCode")
+      .populate("machine", "machineName machineCode machineOnTime machineOffTime")
       .populate("shift", "shiftName shiftOnTime shiftOffTime")
       .sort({ date: -1, mcStartTime: -1 })
       .lean();
@@ -379,10 +372,12 @@ exports.getShiftTimeReport = async (req, res) => {
     // everywhere else (Machine Master's Shift Time column, Working Schedule
     // Time): earlier of Shift On/M-C Start, later of Shift Off/M-C Off.
     // "HH:mm" strings compare correctly with plain string min/max since
-    // they're always zero-padded to the same width.
+    // they're always zero-padded to the same width. Prefers the entry's own
+    // Machine's Shift Time Start/End (current source of truth); falls back
+    // to the legacy `shift` ref for entries saved before this change.
     const rows = entries.map((e) => {
-      const shiftOnTime = e.shift?.shiftOnTime || null;
-      const shiftOffTime = e.shift?.shiftOffTime || null;
+      const shiftOnTime = e.machine?.machineOnTime || e.shift?.shiftOnTime || null;
+      const shiftOffTime = e.machine?.machineOffTime || e.shift?.shiftOffTime || null;
       const effectiveStartTime = shiftOnTime
         ? (e.mcStartTime < shiftOnTime ? e.mcStartTime : shiftOnTime)
         : e.mcStartTime;

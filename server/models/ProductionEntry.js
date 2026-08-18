@@ -4,13 +4,16 @@ const mongoose = require("mongoose");
  * Production Data Entry — Glass Grinding
  *
  * Required fields:
- *   machine, shift, date, mcStartTime, mcOffTime,
+ *   machine, date, mcStartTime, mcOffTime,
  *   sizeWidthMm, sizeHeightMm, thicknessMm,
  *   processQty, okQty, rejectedQty, standardTimePerPieceMin
  *
  * Overtime is not entered manually — it (along with Start Delay / Early
- * Closed) is derived server-side from `shift` (shiftOnTime/shiftOffTime)
- * vs. mcStartTime/mcOffTime. See productionCalculation.service.js.
+ * Closed) is derived server-side from the entry's Machine's own Shift Time
+ * Start/End (machineOnTime/machineOffTime, set in Machine Master) vs.
+ * mcStartTime/mcOffTime. See productionCalculation.service.js.
+ * `shift` is a legacy field — no longer set by the entry form, kept only
+ * so entries saved before this change retain their original Shift link.
  *
  * Optional stoppage / downtime fields (default 0, max 1440 min):
  *   plannedDowntimeMin, overtimeMin (auto-derived, see above),
@@ -32,10 +35,14 @@ const ProductionEntrySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Operator",
     },
+    // No longer collected on the entry form — Shift On/Off Time for the
+    // Overtime/Working Schedule Time calculation now comes from the
+    // entry's own Machine (see applyShiftCalculations in
+    // productionEntry.controller.js). Kept optional, not removed, so
+    // historical entries saved before this change keep their Shift link.
     shift: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Shift",
-      required: [true, "Shift is required"],
     },
     date: {
       type: Date,

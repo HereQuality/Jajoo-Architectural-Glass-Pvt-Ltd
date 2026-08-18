@@ -5,10 +5,11 @@
  *
  * Formulas (as defined by the factory / business owner):
  *
- *   Shift Duration          = Shift Off Time − Shift On Time (the shift's own scheduled
- *                             window, from the entry's Shift ref — NOT M/C Start/Off Time;
- *                             falls back to M/C Off − M/C Start only when an entry has no
- *                             shift at all). Handles midnight crossover.
+ *   Shift Duration          = Shift Off Time − Shift On Time (the entry's Machine's own
+ *                             scheduled window — Shift Time Start/End, set in Machine
+ *                             Master — NOT M/C Start/Off Time; falls back to M/C Off −
+ *                             M/C Start only when the machine has no Shift Time of its own
+ *                             configured). Handles midnight crossover.
  *   Total Stoppage          = Sum of Downtime & Stoppage Reason minutes, EXCLUDING Planned
  *                             Downtime (No Manpower + Mechanical Breakdown + Electrical
  *                             Breakdown + Raw Material Not Available + Stoppage (Human Error)
@@ -34,15 +35,15 @@
  *   Quality Ratio           = OK Qty ÷ Process Qty
  *   OEE %                   = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if AWT is NA)
  *
- * Overtime / Start Delay / Early Closed (derived from the entry's Shift vs. its
- * actual M/C Start/Off Time — not entered manually):
+ * Overtime / Start Delay / Early Closed (derived from the entry's Machine's own Shift
+ * Time Start/End vs. its actual M/C Start/Off Time — not entered manually):
  *   Overtime       = max(0, Shift On − M/C Start) + max(0, M/C Off − Shift Off)
  *                    (minutes the machine ran outside its scheduled shift window)
  *   Start Delay    = max(0, M/C Start − Shift On)  (machine started after shift began)
  *   Early Closed   = max(0, Shift Off − M/C Off)   (machine stopped before shift ended)
  * `entry.shiftOnTime`/`entry.shiftOffTime` (passed in by the caller after
- * resolving the entry's `shift` ref) drive these; if absent, Overtime/Start
- * Delay/Early Closed all default to 0.
+ * resolving the entry's Machine's own machineOnTime/machineOffTime) drive
+ * these; if absent, Overtime/Start Delay/Early Closed all default to 0.
  *
  * NOTE: `calculated` is computed server-side at save time and stored, so
  * historical rows never change if formulas are tweaked later.

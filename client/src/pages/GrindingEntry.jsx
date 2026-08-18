@@ -8,7 +8,6 @@ import { MenuContext } from "../context/MenuContext";
 import { useMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import { useOperators } from "../hooks/useOperators";
-import { useShifts } from "../hooks/useShifts";
 import { useDebounce } from "../hooks/useDebounce";
 import { listStandardTimes } from "../api/standardTime.api";
 import {
@@ -113,7 +112,6 @@ const buildInit = (machineId = "") => ({
   mcOffTime: "",
   machine: machineId,
   operator: "",
-  shift: "",
   shiftOnTime: "",
   shiftOffTime: "",
   sizeWidthMm: "",
@@ -216,7 +214,6 @@ const validate = (v) => {
   if (!v.process) e.process = "Please select a process";
   if (!v.machine) e.machine = "Please select a machine";
   if (!v.operator) e.operator = "Please select an operator";
-  if (!v.shift) e.shift = "Please select a shift";
   if (!v.sizeWidthMm) e.sizeWidthMm = "Width is required";
   if (!v.sizeHeightMm) e.sizeHeightMm = "Height is required";
   if (!v.thicknessMm) e.thicknessMm = "Thickness is required";
@@ -252,7 +249,7 @@ const validate = (v) => {
   // that feeds it is itself already valid, so this doesn't pile on top of
   // more basic errors above.
   const stoppageFieldsClean = STOPPAGE_FIELDS.every((f) => !e[f.key]);
-  if (!e.mcStartTime && !e.mcOffTime && !e.shift && !e.standardTimePerPieceMin && !e.processQty && stoppageFieldsClean) {
+  if (!e.mcStartTime && !e.mcOffTime && !e.standardTimePerPieceMin && !e.processQty && stoppageFieldsClean) {
     const idealProductionQty = computeIdealProductionQty(v);
     if (idealProductionQty === null) {
       e.processQty =
@@ -699,7 +696,6 @@ const GrindingEntry = () => {
   const { data: machines = [] } = useMachines();
   const { data: processes = [] } = useProcesses();
   const { data: operators = [] } = useOperators();
-  const { data: shifts = [] } = useShifts();
 
   const [activeMachine, setActiveMachine] = useState("");
   const [sheetSearch, setSheetSearch] = useState("");
@@ -817,20 +813,12 @@ const GrindingEntry = () => {
     );
   }, [machines, formProcess]);
 
-  // Selecting a Process auto-applies that process's own default Shift
-  // (configured in Process Master) — Shift On/Off Time and M/C Start/Off
-  // Time populate immediately, exactly like picking a Shift directly does,
-  // so the operator doesn't have to separately hunt down the Shift dropdown.
-  // Only fills in a Shift that isn't already chosen — never overwrites a
-  // Shift the operator already picked by hand. M/C Start/Off Time follow
-  // the per-field touched flags, not a blank-check, since a later Machine
-  // pick (which has its own Shift Time Start/End) is meant to override
-  // this default.
+  // Process is just a narrowing filter for the M/C Name dropdown below — it
+  // no longer supplies any Shift/time default itself (that's the selected
+  // Machine's job now, see handleChange's "machine" branch).
   const handleProcessSelect = (e) => {
     const val = e.target.value;
     setFormProcess(val);
-    const proc = processes.find((p) => p._id === val);
-    const procShift = proc?.shift && typeof proc.shift === "object" ? proc.shift : null;
     setValues((prev) => ({
       ...prev,
       machine: "",
@@ -838,15 +826,8 @@ const GrindingEntry = () => {
       sizeHeightMm: "",
       thicknessMm: "",
       standardTimePerPieceMin: "",
-      ...(procShift && !prev.shift
-        ? {
-            shift: procShift._id,
-            shiftOnTime: procShift.shiftOnTime,
-            shiftOffTime: procShift.shiftOffTime,
-            ...(mcStartTouched ? {} : { mcStartTime: procShift.shiftOnTime }),
-            ...(mcOffTouched ? {} : { mcOffTime: procShift.shiftOffTime }),
-          }
-        : {}),
+      shiftOnTime: "",
+      shiftOffTime: "",
     }));
     setStdTimes([]);
   };
@@ -1010,15 +991,16 @@ const GrindingEntry = () => {
     // while editing can't silently overwrite what actually happened.
     setMcStartTouched(true);
     setMcOffTouched(true);
+    const machineId = typeof e.machine === "object" ? e.machine._id : e.machine;
+    const machineObj = machines.find((m) => m._id === machineId);
     setValues({
       date: new Date(e.date).toISOString().split("T")[0],
       mcStartTime: e.mcStartTime || "",
       mcOffTime: e.mcOffTime || "",
-      machine: typeof e.machine === "object" ? e.machine._id : e.machine,
+      machine: machineId,
       operator: e.operator?._id || "",
-      shift: typeof e.shift === "object" ? e.shift?._id || "" : e.shift || "",
-      shiftOnTime: typeof e.shift === "object" ? e.shift?.shiftOnTime || "" : "",
-      shiftOffTime: typeof e.shift === "object" ? e.shift?.shiftOffTime || "" : "",
+      shiftOnTime: machineObj?.machineOnTime || "",
+      shiftOffTime: machineObj?.machineOffTime || "",
       sizeWidthMm: e.sizeWidthMm || "",
       sizeHeightMm: e.sizeHeightMm || "",
       thicknessMm: e.thicknessMm || "",
@@ -1031,8 +1013,6 @@ const GrindingEntry = () => {
     });
     setFormErrors({});
     setSubmitted(false);
-    const machineId = typeof e.machine === "object" ? e.machine._id : e.machine;
-    const machineObj = machines.find((m) => m._id === machineId);
     const firstProcess = machineObj?.processes?.[0];
     setFormProcess(firstProcess ? (typeof firstProcess === "object" ? firstProcess._id : firstProcess) : "");
     fetchStdTimes(machineId);
@@ -1060,12 +1040,12 @@ const GrindingEntry = () => {
   const handleChange = (e) => {
     const { name, value } = e.target;
     if (name === "machine") {
-      // Selecting a Machine auto-applies that machine's own Shift Time
-      // Start/End (configured in Machine Master) to M/C Start/Off Time —
-      // this is the most specific source, so (while untouched by hand) it
-      // overrides whatever Process's default Shift may have already filled
-      // in. Falls back to whatever was already there if this machine has no
-      // Shift Time of its own configured.
+      // Selecting a Machine applies its own Shift Time Start/End
+      // (configured in Machine Master) to both the read-only Shift On/Off
+      // Time display (always — that's just "what this machine is scheduled
+      // for") and, while untouched by hand, to M/C Start/Off Time too (the
+      // actual times, which the operator can still override to capture real
+      // variance — that's what feeds Overtime/Start Delay/Early Closed).
       const machineObj = machines.find((m) => m._id === value);
       setValues((prev) => ({
         ...prev,
@@ -1074,6 +1054,8 @@ const GrindingEntry = () => {
         sizeHeightMm: "",
         thicknessMm: "",
         standardTimePerPieceMin: "",
+        shiftOnTime: machineObj?.machineOnTime || "",
+        shiftOffTime: machineObj?.machineOffTime || "",
         ...(mcStartTouched ? {} : { mcStartTime: machineObj?.machineOnTime || prev.mcStartTime || "" }),
         ...(mcOffTouched ? {} : { mcOffTime: machineObj?.machineOffTime || prev.mcOffTime || "" }),
       }));
@@ -1083,28 +1065,6 @@ const GrindingEntry = () => {
       if (name === "mcOffTime") setMcOffTouched(true);
       setValues((prev) => ({ ...prev, [name]: value }));
     }
-  };
-
-  // Selecting a Shift populates the read-only Shift On/Off Time blocks shown
-  // in the form (Overtime is derived from these, not entered manually), and
-  // also defaults M/C Start/Off Time to the shift's own schedule so nothing
-  // needs to be typed by hand for a normal on-time shift — still editable,
-  // since capturing the actual variance (early start, late finish, etc.) is
-  // exactly what feeds Overtime/Start Delay/Early Closed. Follows the same
-  // per-field touched flags as Process/Machine — never overwrites a
-  // hand-typed value, but a deliberate Shift pick does override an
-  // untouched default (from Process or Machine) in the other field.
-  const handleShiftChange = (e) => {
-    const id = e.target.value;
-    const s = shifts.find((sh) => sh._id === id);
-    setValues((prev) => ({
-      ...prev,
-      shift: id,
-      shiftOnTime: s?.shiftOnTime || "",
-      shiftOffTime: s?.shiftOffTime || "",
-      ...(mcStartTouched ? {} : { mcStartTime: s?.shiftOnTime || prev.mcStartTime || "" }),
-      ...(mcOffTouched ? {} : { mcOffTime: s?.shiftOffTime || prev.mcOffTime || "" }),
-    }));
   };
 
   const handleSubmit = (e) => {
@@ -1313,8 +1273,8 @@ const GrindingEntry = () => {
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.operator?.name || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcStartTime || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcOffTime || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shift?.shiftOnTime || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shift?.shiftOffTime || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{(typeof e.machine === "object" ? e.machine?.machineOnTime : null) || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{(typeof e.machine === "object" ? e.machine?.machineOffTime : null) || "—"}</td>
 
                 {/* Overtime / Start Delay / Early Closed */}
                 <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtMin(c.overtimeMin)}</td>
@@ -1513,20 +1473,10 @@ const GrindingEntry = () => {
                     {err("mcOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("mcOffTime")}</p>}
                   </div>
 
-                  {/* Shift — selecting one populates the read-only On/Off Time
-                      blocks below; Overtime/Start Delay/Early Closed are
-                      derived from these vs. M/C Start/Off Time, not entered
-                      manually. */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Shift <span className="text-red-500">*</span></label>
-                    <select name="shift" value={values.shift} onChange={handleShiftChange} className={cls(err("shift"))}>
-                      <option value="">Select Shift</option>
-                      {shifts.map((s) => <option key={s._id} value={s._id}>{s.shiftName}</option>)}
-                    </select>
-                    {err("shift") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("shift")}</p>}
-                  </div>
-
-                  {/* Ongoing Shift On/Off Time — read-only, from the selected Shift */}
+                  {/* Shift On/Off Time — read-only, from the selected Machine's
+                      own Shift Time Start/End (Machine Master). Overtime/Start
+                      Delay/Early Closed are derived from these vs. M/C
+                      Start/Off Time, not entered manually. */}
                   <div>
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Shift On Time</label>
                     <input type="text" readOnly value={values.shiftOnTime || "—"}
