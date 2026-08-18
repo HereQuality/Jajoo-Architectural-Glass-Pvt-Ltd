@@ -74,7 +74,7 @@ const CALC_COLUMNS = [
     key: "effectiveMcRunTimeMin",
     label: "Effective M/C Run Time",
     unit: "min",
-    formula: "Effective M/C Run Time = Process Qty (Total Qty) × Standard Time per Glass",
+    formula: "Effective M/C Run Time = Production Qty (Total Qty) × Standard Time per Glass",
   },
   {
     key: "unreportedTimeMin",
@@ -92,13 +92,13 @@ const CALC_COLUMNS = [
     key: "performanceRatio",
     label: "Performance Ratio",
     unit: "",
-    formula: "Performance Ratio = Process Qty (Total Qty) ÷ Ideal Production (NA if Ideal Production is NA)",
+    formula: "Performance Ratio = Production Qty (Total Qty) ÷ Ideal Production (NA if Ideal Production is NA)",
   },
   {
     key: "qualityRatio",
     label: "Quality Ratio",
     unit: "",
-    formula: "Quality Ratio = OK Qty ÷ Process Qty",
+    formula: "Quality Ratio = OK Qty ÷ Production Qty",
   },
 ];
 
@@ -221,7 +221,7 @@ const validate = (v) => {
   else if (isNaN(Number(v.standardTimePerPieceMin)) || Number(v.standardTimePerPieceMin) <= 0) e.standardTimePerPieceMin = "Must be a number > 0";
 
   const pq = Number(v.processQty);
-  if (v.processQty === "") e.processQty = "Process Qty is required";
+  if (v.processQty === "") e.processQty = "Production Qty is required";
   else if (!Number.isInteger(pq) || pq < 1) e.processQty = "Must be a whole number ≥ 1";
   else if (String(v.processQty).length > 30) e.processQty = "Cannot exceed 30 digits";
 
@@ -231,7 +231,7 @@ const validate = (v) => {
   else if (String(v.okQty).length > 30) e.okQty = "Cannot exceed 30 digits";
 
   if (!e.processQty && !e.okQty && oq > pq)
-    e.okQty = "OK Qty cannot exceed Process Qty";
+    e.okQty = "OK Qty cannot exceed Production Qty";
 
   for (const f of STOPPAGE_FIELDS) {
     const val = v[f.key];
@@ -258,7 +258,7 @@ const validate = (v) => {
     } else if (idealProductionQty < pq) {
       e.processQty =
         `Not achievable: Available Working Time ÷ Standard Time = ${idealProductionQty.toFixed(2)} pcs, ` +
-        `which is less than Process Qty (${pq}). Reduce Process Qty or free up more Available Working Time.`;
+        `which is less than Production Qty (${pq}). Reduce Production Qty or free up more Available Working Time.`;
     }
   }
 
@@ -345,7 +345,7 @@ const OPERATOR_COLUMNS = [
   { key: "qualityRatio", label: "Quality Ratio", fmt: fmtPct, align: "font-medium text-brand-700 dark:text-brand-300" },
 ];
 const MACHINE_COLUMNS = [
-  { key: "processQty", label: "Process Qty", fmt: fmtQty, align: "" },
+  { key: "processQty", label: "Production Qty", fmt: fmtQty, align: "" },
   { key: "okQty", label: "OK Qty", fmt: fmtQty, align: "" },
   { key: "oeePercent", label: "OEE %", fmt: fmtPct, align: "font-bold text-brand-800 dark:text-brand-200" },
   { key: "availabilityRatio", label: "Availability", fmt: fmtPct, align: "font-medium text-brand-700 dark:text-brand-300" },
@@ -708,16 +708,6 @@ const GrindingEntry = () => {
   const [loadingSheet, setLoadingSheet] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [values, setValues] = useState(buildInit());
-  // Tracks, per field, whether the operator has hand-typed M/C Start/Off
-  // Time this session — once a field is touched, Process/Shift/Machine
-  // auto-fill must never overwrite it (capturing the actual variance is the
-  // whole point of Overtime/Start Delay/Early Closed). Until touched, each
-  // of those three auto-fills freely overwrites the others' defaults for
-  // that field — whichever the operator picks last wins, most-specific
-  // (Machine) included. Kept per-field, not combined, so hand-typing only
-  // Start Time doesn't also freeze the still-untouched Off Time.
-  const [mcStartTouched, setMcStartTouched] = useState(false);
-  const [mcOffTouched, setMcOffTouched] = useState(false);
   const [formErrors, setFormErrors] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -977,8 +967,6 @@ const GrindingEntry = () => {
     setFormErrors({});
     setSubmitted(false);
     setFormProcess("");
-    setMcStartTouched(false);
-    setMcOffTouched(false);
     fetchStdTimes(initMachine);
     setShowModal(true);
   };
@@ -986,11 +974,6 @@ const GrindingEntry = () => {
   const openEdit = (e) => {
     setEditId(e._id);
     setFormProcess("");
-    // Editing an existing entry starts from its real, already-recorded
-    // times — treat them as "touched" so switching Process/Shift/Machine
-    // while editing can't silently overwrite what actually happened.
-    setMcStartTouched(true);
-    setMcOffTouched(true);
     const machineId = typeof e.machine === "object" ? e.machine._id : e.machine;
     const machineObj = machines.find((m) => m._id === machineId);
     setValues({
@@ -1046,11 +1029,11 @@ const GrindingEntry = () => {
     const { name, value } = e.target;
     if (name === "machine") {
       // Selecting a Machine applies its own Shift Time Start/End
-      // (configured in Machine Master) to both the read-only Shift On/Off
-      // Time display (always — that's just "what this machine is scheduled
-      // for") and, while untouched by hand, to M/C Start/Off Time too (the
-      // actual times, which the operator can still override to capture real
-      // variance — that's what feeds Overtime/Start Delay/Early Closed).
+      // (configured in Machine Master) to the read-only Shift On/Off Time
+      // display only — that's just "what this machine is scheduled for".
+      // M/C Start/Off Time is deliberately left for the operator to type in
+      // by hand every time (the actual times worked, which is what feeds
+      // Overtime/Start Delay/Early Closed) — never auto-filled from it.
       const machineObj = machines.find((m) => m._id === value);
       setValues((prev) => ({
         ...prev,
@@ -1061,13 +1044,9 @@ const GrindingEntry = () => {
         standardTimePerPieceMin: "",
         shiftOnTime: machineObj?.machineOnTime || "",
         shiftOffTime: machineObj?.machineOffTime || "",
-        ...(mcStartTouched ? {} : { mcStartTime: machineObj?.machineOnTime || prev.mcStartTime || "" }),
-        ...(mcOffTouched ? {} : { mcOffTime: machineObj?.machineOffTime || prev.mcOffTime || "" }),
       }));
       fetchStdTimes(value);
     } else {
-      if (name === "mcStartTime") setMcStartTouched(true);
-      if (name === "mcOffTime") setMcOffTouched(true);
       setValues((prev) => ({ ...prev, [name]: value }));
     }
   };
@@ -1219,7 +1198,7 @@ const GrindingEntry = () => {
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Size (mm)</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Thickness</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Std. Time (min)</th>
-              <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Process Qty (Total Qty)</th>
+              <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Production Qty (Total Qty)</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">OK Qty</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Rejected Qty</th>
 
@@ -1581,7 +1560,7 @@ const GrindingEntry = () => {
 
                   <div>
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                      Process Qty (Total Qty) <span className="text-red-500">*</span>
+                      Production Qty (Total Qty) <span className="text-red-500">*</span>
                     </label>
                     <input type="number" name="processQty" value={values.processQty} onChange={handleChange} onWheel={(e) => e.target.blur()} ref={noWheelChange}
                       onInput={(e) => e.target.value = e.target.value.slice(0, 30)}
@@ -1614,7 +1593,7 @@ const GrindingEntry = () => {
                   <div className="sm:col-span-2">
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
                       Rejected Qty
-                      <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-calculated: Process Qty − OK Qty)</span>
+                      <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-calculated: Production Qty − OK Qty)</span>
                     </label>
                     <input
                       type="text"

@@ -53,7 +53,7 @@ async function validatePayload(body) {
   const thickness = typeof body.thicknessMm === "string" ? body.thicknessMm.trim() : body.thicknessMm;
   if (!thickness && thickness !== 0) errors.thicknessMm = "Thickness is required";
 
-  const qty = { processQty: "Process Qty", okQty: "OK Qty" };
+  const qty = { processQty: "Production Qty", okQty: "OK Qty" };
   for (const [k, label] of Object.entries(qty)) {
     const v = Number(body[k]);
     if (body[k] === undefined || body[k] === "") errors[k] = `${label} is required`;
@@ -63,7 +63,7 @@ async function validatePayload(body) {
   }
   if (!errors.processQty && !errors.okQty) {
     if (Number(body.okQty) > Number(body.processQty))
-      errors.okQty = "OK Qty cannot exceed Process Qty";
+      errors.okQty = "OK Qty cannot exceed Production Qty";
   }
 
   const st = Number(body.standardTimePerPieceMin);
@@ -105,13 +105,13 @@ function buildData(body) {
     data.thicknessMm = String(body.thicknessMm).trim();
   }
   // Rejected Qty is never entered manually — always derived server-side so
-  // it can never drift from Process Qty / OK Qty (and is never missing).
+  // it can never drift from Production Qty / OK Qty (and is never missing).
   data.rejectedQty = Math.max(0, Number(body.processQty) - Number(body.okQty));
   return data;
 }
 
 // Server-side backstop for the same check the client already runs before
-// submitting: Process Qty can't exceed what Available Working Time actually
+// submitting: Production Qty can't exceed what Available Working Time actually
 // allows at this Standard Time (Ideal Production). Re-derived from `data.
 // calculated` — the same numbers that get stored — so it can never disagree
 // with what the client saw.
@@ -123,7 +123,7 @@ function capacityError(data) {
   }
   if (ideal < data.processQty) {
     return `Not achievable: Available Working Time ÷ Standard Time = ${ideal.toFixed(2)} pcs, ` +
-      `which is less than Process Qty (${data.processQty}). Reduce Process Qty or free up more Available Working Time.`;
+      `which is less than Production Qty (${data.processQty}). Reduce Production Qty or free up more Available Working Time.`;
   }
   return null;
 }

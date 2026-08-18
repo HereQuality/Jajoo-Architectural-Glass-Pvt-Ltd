@@ -28,11 +28,11 @@
  *                              whole shift was consumed by downtime/stoppage, so there is
  *                              no time left to produce anything)
  *   Ideal Production (Qty)  = Available Working Time ÷ Standard Time per Glass (NA if AWT is NA)
- *   Effective M/C Run Time  = Process Qty × Standard Time per Glass
+ *   Effective M/C Run Time  = Production Qty × Standard Time per Glass
  *   Unreported Time         = Available Working Time − Effective M/C Run Time (NA if AWT is NA)
  *   Availability Ratio      = Available Working Time ÷ Working Schedule Time (NA if AWT is NA)
  *   Performance Ratio       = Effective M/C Run Time ÷ Available Working Time (NA if AWT is NA)
- *   Quality Ratio           = OK Qty ÷ Process Qty
+ *   Quality Ratio           = OK Qty ÷ Production Qty
  *   OEE %                   = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if AWT is NA)
  *
  * Overtime / Start Delay / Early Closed (derived from the entry's Machine's own Shift
@@ -166,7 +166,7 @@ function computeCalculations(entry) {
   // 5. Ideal Production = Available Working Time ÷ Standard Time per Glass
   const idealProductionQty = isAwtNa ? null : (standardTimePerPieceMin > 0 ? availableWorkingMin / standardTimePerPieceMin : 0);
 
-  // 6. Effective M/C Run Time = Process Qty × Standard Time per Glass
+  // 6. Effective M/C Run Time = Production Qty × Standard Time per Glass
   const effectiveMcRunTimeMin = num(entry.processQty) * standardTimePerPieceMin;
 
   // 7. Unreported Time = Available Working Time − Effective M/C Run Time
@@ -175,10 +175,10 @@ function computeCalculations(entry) {
   // 8. Availability Ratio = Available Working Time ÷ Working Schedule Time
   const availabilityRatio = isAwtNa ? null : (workingScheduleMin > 0 ? availableWorkingMin / workingScheduleMin : 0);
 
-  // 9. Performance Ratio = Process Qty ÷ Ideal Production
+  // 9. Performance Ratio = Production Qty ÷ Ideal Production
   const performanceRatio = isAwtNa ? null : (idealProductionQty > 0 ? num(entry.processQty) / idealProductionQty : 0);
 
-  // 10. Quality Ratio = OK Qty ÷ Process Qty
+  // 10. Quality Ratio = OK Qty ÷ Production Qty
   const qualityRatio = num(entry.processQty) > 0 ? num(entry.okQty) / num(entry.processQty) : 0;
 
   // 11. OEE % = Availability × Performance × Quality × 100

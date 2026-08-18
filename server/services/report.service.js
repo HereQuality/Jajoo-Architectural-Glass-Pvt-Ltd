@@ -14,7 +14,7 @@ const ALL_COLUMNS = [
   { key: "workMin", label: "Working Schedule (min)", width: 78, fmt: (n) => n.toFixed(2) },
   { key: "availRatio", label: "Availability Ratio", width: 68, fmt: (n) => n.toFixed(2) + "%" },
   { key: "okQty", label: "OK Qty", width: 55, fmt: (n) => String(Math.round(n)) },
-  { key: "processQty", label: "Process Qty", width: 68, fmt: (n) => String(Math.round(n)) },
+  { key: "processQty", label: "Production Qty", width: 68, fmt: (n) => String(Math.round(n)) },
   { key: "qualRatio", label: "Quality Ratio", width: 65, fmt: (n) => n.toFixed(2) + "%" },
   { key: "idealQty", label: "Ideal Qty", width: 62, fmt: (n) => n.toFixed(2) },
   { key: "perfRatio", label: "Performance Ratio", width: 70, fmt: (n) => n.toFixed(2) + "%" },
@@ -464,7 +464,7 @@ function buildGrindingEfficiencyPdf({ tab, rows, from, to, filterDescription }) 
       ]
     : [
         { key: "name", label: nameLabel, width: 140 },
-        { key: "processQty", label: "Process Qty", width: 90, fmt: fmtQtyOrNa },
+        { key: "processQty", label: "Production Qty", width: 90, fmt: fmtQtyOrNa },
         { key: "okQty", label: "OK Qty", width: 80, fmt: fmtQtyOrNa },
         { key: "oeePercent", label: "OEE %", width: 80, fmt: fmtPctOrNa },
         { key: "availabilityRatio", label: "Availability", width: 90, fmt: fmtPctOrNa },

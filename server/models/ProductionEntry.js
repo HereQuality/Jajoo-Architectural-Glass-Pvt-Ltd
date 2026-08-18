@@ -98,8 +98,8 @@ const ProductionEntrySchema = new mongoose.Schema(
     // ── Output quantities ─────────────────────
     processQty: {
       type: Number,
-      required: [true, "Number of Process Qty is required"],
-      min: [1, "Process Qty must be at least 1"],
+      required: [true, "Number of Production Qty is required"],
+      min: [1, "Production Qty must be at least 1"],
     },
     okQty: {
       type: Number,
@@ -172,7 +172,7 @@ const ProductionEntrySchema = new mongoose.Schema(
 ProductionEntrySchema.pre("validate", function (next) {
   if (this.okQty != null && this.rejectedQty != null && this.processQty != null) {
     if (this.okQty + this.rejectedQty > this.processQty) {
-      return next(new Error("OK Qty + Rejected Qty cannot exceed Process Qty"));
+      return next(new Error("OK Qty + Rejected Qty cannot exceed Production Qty"));
     }
   }
   next();

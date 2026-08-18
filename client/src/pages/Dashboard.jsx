@@ -18,7 +18,7 @@ const REPORT_COLUMNS = [
   { key: "workMin", label: "Working Schedule (min)" },
   { key: "availRatio", label: "Availability Ratio" },
   { key: "okQty", label: "OK Qty" },
-  { key: "processQty", label: "Process Qty" },
+  { key: "processQty", label: "Production Qty" },
   { key: "qualRatio", label: "Quality Ratio" },
   { key: "idealQty", label: "Ideal Qty" },
   { key: "perfRatio", label: "Performance Ratio" },

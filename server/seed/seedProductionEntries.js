@@ -209,7 +209,7 @@ async function seedProductionEntries(machines, operators, shift) {
       // as productionEntry.controller.js's applyShiftCalculations.
       const calcInput = { ...entry, shiftOnTime: shift.shiftOnTime, shiftOffTime: shift.shiftOffTime };
       const calculated = computeCalculations(calcInput);
-      // Keep Process Qty comfortably inside what the shift can actually
+      // Keep Production Qty comfortably inside what the shift can actually
       // produce (Ideal Production), same as the real form's own capacity
       // check would require — a realistic 75-95% of ideal, not more.
       const idealQty = calculated.idealProductionQty || 0;
