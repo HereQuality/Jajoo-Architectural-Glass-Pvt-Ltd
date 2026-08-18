@@ -227,14 +227,10 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
             </div>
           </div>
 
-          {/* Machine Start/End Time — manually entered here. The combined
-              "Shift Time" shown in the table (min of Shift On/Machine On,
-              max of Shift Off/Machine Off) is DERIVED from these plus the
-              machine's process's Shift, and is never itself directly
-              editable — only these two raw times are. */}
+          {/* Shift Time Start/End */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Machine Start Time</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Shift Time Start</label>
               <TimePicker
                 name="machineOnTime"
                 value={values.machineOnTime}
@@ -246,7 +242,7 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Machine End Time</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Shift Time End</label>
               <TimePicker
                 name="machineOffTime"
                 value={values.machineOffTime}
@@ -257,23 +253,6 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
                 <p className="text-xs text-red-500 mt-1">{formErrors.machineOffTime}</p>
               )}
             </div>
-          </div>
-
-          {/* Shift Time — read-only preview of the combined value described
-              above. Only shows once both this machine's own times and its
-              process's Shift are known. */}
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">
-              Shift Time
-              <span className="ml-1 text-xs text-slate-400 font-normal">(read-only, auto-calculated)</span>
-            </label>
-            <input
-              type="text"
-              readOnly
-              disabled
-              value={mode === "edit" && values.shiftTime ? `${values.shiftTime.onTime} – ${values.shiftTime.offTime}` : "—"}
-              className="w-full border border-slate-200 bg-slate-50 rounded-xl px-3.5 py-2.5 text-sm text-slate-500 outline-none cursor-not-allowed"
-            />
           </div>
 
           {/* Active toggle */}
@@ -363,7 +342,6 @@ const MachineMaster = () => {
           machineOnTime: m.machineOnTime || "",
           machineOffTime: m.machineOffTime || "",
           isActive: m.isActive,
-          shiftTime: m.shiftTime || null,
         });
         setEditMachineId(id);
       })

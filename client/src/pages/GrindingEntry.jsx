@@ -712,6 +712,16 @@ const GrindingEntry = () => {
   const [loadingSheet, setLoadingSheet] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [values, setValues] = useState(buildInit());
+  // Tracks, per field, whether the operator has hand-typed M/C Start/Off
+  // Time this session — once a field is touched, Process/Shift/Machine
+  // auto-fill must never overwrite it (capturing the actual variance is the
+  // whole point of Overtime/Start Delay/Early Closed). Until touched, each
+  // of those three auto-fills freely overwrites the others' defaults for
+  // that field — whichever the operator picks last wins, most-specific
+  // (Machine) included. Kept per-field, not combined, so hand-typing only
+  // Start Time doesn't also freeze the still-untouched Off Time.
+  const [mcStartTouched, setMcStartTouched] = useState(false);
+  const [mcOffTouched, setMcOffTouched] = useState(false);
   const [formErrors, setFormErrors] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -812,7 +822,10 @@ const GrindingEntry = () => {
   // Time populate immediately, exactly like picking a Shift directly does,
   // so the operator doesn't have to separately hunt down the Shift dropdown.
   // Only fills in a Shift that isn't already chosen — never overwrites a
-  // Shift the operator already picked by hand.
+  // Shift the operator already picked by hand. M/C Start/Off Time follow
+  // the per-field touched flags, not a blank-check, since a later Machine
+  // pick (which has its own Shift Time Start/End) is meant to override
+  // this default.
   const handleProcessSelect = (e) => {
     const val = e.target.value;
     setFormProcess(val);
@@ -830,8 +843,8 @@ const GrindingEntry = () => {
             shift: procShift._id,
             shiftOnTime: procShift.shiftOnTime,
             shiftOffTime: procShift.shiftOffTime,
-            mcStartTime: prev.mcStartTime || procShift.shiftOnTime,
-            mcOffTime: prev.mcOffTime || procShift.shiftOffTime,
+            ...(mcStartTouched ? {} : { mcStartTime: procShift.shiftOnTime }),
+            ...(mcOffTouched ? {} : { mcOffTime: procShift.shiftOffTime }),
           }
         : {}),
     }));
@@ -983,6 +996,8 @@ const GrindingEntry = () => {
     setFormErrors({});
     setSubmitted(false);
     setFormProcess("");
+    setMcStartTouched(false);
+    setMcOffTouched(false);
     fetchStdTimes(initMachine);
     setShowModal(true);
   };
@@ -990,6 +1005,11 @@ const GrindingEntry = () => {
   const openEdit = (e) => {
     setEditId(e._id);
     setFormProcess("");
+    // Editing an existing entry starts from its real, already-recorded
+    // times — treat them as "touched" so switching Process/Shift/Machine
+    // while editing can't silently overwrite what actually happened.
+    setMcStartTouched(true);
+    setMcOffTouched(true);
     setValues({
       date: new Date(e.date).toISOString().split("T")[0],
       mcStartTime: e.mcStartTime || "",
@@ -1040,6 +1060,13 @@ const GrindingEntry = () => {
   const handleChange = (e) => {
     const { name, value } = e.target;
     if (name === "machine") {
+      // Selecting a Machine auto-applies that machine's own Shift Time
+      // Start/End (configured in Machine Master) to M/C Start/Off Time —
+      // this is the most specific source, so (while untouched by hand) it
+      // overrides whatever Process's default Shift may have already filled
+      // in. Falls back to whatever was already there if this machine has no
+      // Shift Time of its own configured.
+      const machineObj = machines.find((m) => m._id === value);
       setValues((prev) => ({
         ...prev,
         machine: value,
@@ -1047,9 +1074,13 @@ const GrindingEntry = () => {
         sizeHeightMm: "",
         thicknessMm: "",
         standardTimePerPieceMin: "",
+        ...(mcStartTouched ? {} : { mcStartTime: machineObj?.machineOnTime || prev.mcStartTime || "" }),
+        ...(mcOffTouched ? {} : { mcOffTime: machineObj?.machineOffTime || prev.mcOffTime || "" }),
       }));
       fetchStdTimes(value);
     } else {
+      if (name === "mcStartTime") setMcStartTouched(true);
+      if (name === "mcOffTime") setMcOffTouched(true);
       setValues((prev) => ({ ...prev, [name]: value }));
     }
   };
@@ -1059,8 +1090,10 @@ const GrindingEntry = () => {
   // also defaults M/C Start/Off Time to the shift's own schedule so nothing
   // needs to be typed by hand for a normal on-time shift — still editable,
   // since capturing the actual variance (early start, late finish, etc.) is
-  // exactly what feeds Overtime/Start Delay/Early Closed. Only pre-fills
-  // fields that are still empty — never overwrites a value already entered.
+  // exactly what feeds Overtime/Start Delay/Early Closed. Follows the same
+  // per-field touched flags as Process/Machine — never overwrites a
+  // hand-typed value, but a deliberate Shift pick does override an
+  // untouched default (from Process or Machine) in the other field.
   const handleShiftChange = (e) => {
     const id = e.target.value;
     const s = shifts.find((sh) => sh._id === id);
@@ -1069,8 +1102,8 @@ const GrindingEntry = () => {
       shift: id,
       shiftOnTime: s?.shiftOnTime || "",
       shiftOffTime: s?.shiftOffTime || "",
-      mcStartTime: prev.mcStartTime || s?.shiftOnTime || "",
-      mcOffTime: prev.mcOffTime || s?.shiftOffTime || "",
+      ...(mcStartTouched ? {} : { mcStartTime: s?.shiftOnTime || prev.mcStartTime || "" }),
+      ...(mcOffTouched ? {} : { mcOffTime: s?.shiftOffTime || prev.mcOffTime || "" }),
     }));
   };
 
