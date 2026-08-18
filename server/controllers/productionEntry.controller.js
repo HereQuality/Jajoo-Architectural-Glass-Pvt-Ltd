@@ -375,19 +375,41 @@ exports.getShiftTimeReport = async (req, res) => {
       .sort({ date: -1, mcStartTime: -1 })
       .lean();
 
-    const rows = entries.map((e) => ({
-      _id: e._id,
-      date: e.date,
-      machineName: e.machine?.machineName || "Unknown Machine",
-      shiftName: e.shift?.shiftName || "—",
-      shiftOnTime: e.shift?.shiftOnTime || null,
-      shiftOffTime: e.shift?.shiftOffTime || null,
-      mcStartTime: e.mcStartTime,
-      mcOffTime: e.mcOffTime,
-      overtimeMin: e.calculated?.overtimeMin ?? e.overtimeMin ?? 0,
-      startDelayMin: e.calculated?.startDelayMin ?? 0,
-      earlyClosedMin: e.calculated?.earlyClosedMin ?? 0,
-    }));
+    // Effective Shift Start/End — the same min/max envelope rule used
+    // everywhere else (Machine Master's Shift Time column, Working Schedule
+    // Time): earlier of Shift On/M-C Start, later of Shift Off/M-C Off.
+    // "HH:mm" strings compare correctly with plain string min/max since
+    // they're always zero-padded to the same width.
+    const rows = entries.map((e) => {
+      const shiftOnTime = e.shift?.shiftOnTime || null;
+      const shiftOffTime = e.shift?.shiftOffTime || null;
+      const effectiveStartTime = shiftOnTime
+        ? (e.mcStartTime < shiftOnTime ? e.mcStartTime : shiftOnTime)
+        : e.mcStartTime;
+      const effectiveEndTime = shiftOffTime
+        ? (e.mcOffTime > shiftOffTime ? e.mcOffTime : shiftOffTime)
+        : e.mcOffTime;
+
+      return {
+        _id: e._id,
+        date: e.date,
+        machineName: e.machine?.machineName || "Unknown Machine",
+        shiftName: e.shift?.shiftName || "—",
+        shiftOnTime,
+        shiftOffTime,
+        mcStartTime: e.mcStartTime,
+        mcOffTime: e.mcOffTime,
+        effectiveStartTime,
+        effectiveEndTime,
+        // Pulled straight from the stored calculation (same source of truth
+        // as the sheet/Dashboard/PDFs) — never recomputed here, so it can
+        // never drift from what's shown elsewhere.
+        totalShiftTimeMin: e.calculated?.workingScheduleMin ?? 0,
+        overtimeMin: e.calculated?.overtimeMin ?? e.overtimeMin ?? 0,
+        startDelayMin: e.calculated?.startDelayMin ?? 0,
+        earlyClosedMin: e.calculated?.earlyClosedMin ?? 0,
+      };
+    });
 
     res.status(200).json({ isOk: true, data: rows });
   } catch (err) {

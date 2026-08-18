@@ -656,17 +656,17 @@ const ShiftTimeReportModal = ({ onClose }) => {
               <table className="w-full text-xs sm:text-sm border-separate border-spacing-0">
                 <thead>
                   <tr className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-left">
-                    {["Machine", "Shift", "Shift Start", "Shift End", "M/C On", "M/C Off", "Overtime", "Start Delay / Early Closed"].map((h, i, arr) => (
+                    {["Machine", "Shift", "Shift Start", "Shift End", "Shift Start Time", "Shift End Time", "Total Shift Time", "Overtime", "Start Delay / Early Closed"].map((h, i, arr) => (
                       <th key={h} className={`sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-b border-slate-300 dark:border-slate-700 ${i < arr.length - 1 ? "border-r" : ""}`}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {loading && (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-medium">Loading…</td></tr>
+                    <tr><td colSpan={9} className="px-4 py-8 text-center text-slate-500 font-medium">Loading…</td></tr>
                   )}
                   {!loading && rows.length === 0 && (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-medium">No entries match this filter.</td></tr>
+                    <tr><td colSpan={9} className="px-4 py-8 text-center text-slate-500 font-medium">No entries match this filter.</td></tr>
                   )}
                   {!loading && rows.map((r, i) => (
                     <tr key={r._id} className={`border-b border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors ${i % 2 === 1 ? "bg-slate-50/70 dark:bg-slate-800/20" : "bg-white dark:bg-transparent"}`}>
@@ -674,8 +674,9 @@ const ShiftTimeReportModal = ({ onClose }) => {
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{r.shiftName}</td>
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.shiftOnTime || "—"}</td>
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.shiftOffTime || "—"}</td>
-                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.mcStartTime || "—"}</td>
-                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.mcOffTime || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{r.effectiveStartTime || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{r.effectiveEndTime || "—"}</td>
+                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtMin(r.totalShiftTimeMin)}</td>
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmtMin(r.overtimeMin)}</td>
                       <td className="px-3 py-2 whitespace-nowrap text-slate-700 dark:text-slate-200">{fmtDelayOrEarly(r.startDelayMin, r.earlyClosedMin)}</td>
                     </tr>
