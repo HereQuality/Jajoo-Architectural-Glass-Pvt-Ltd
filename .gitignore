@@ -56,3 +56,6 @@ coverage/
 .cache/
 .parcel-cache/
 
+# Database backups (contains live client data — never commit)
+backups/
+

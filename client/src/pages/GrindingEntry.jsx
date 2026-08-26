@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import ReactDOM from "react-dom";
 import Select, { components as selectComponents } from "react-select";
-import { Plus, X, Factory, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock } from "lucide-react";
+import { Plus, Minus, X, Factory, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
@@ -40,6 +40,7 @@ const STOPPAGE_FIELDS = [
 // toward Total Stoppage. Mirrors server/services/productionCalculation
 // .service.js's STOPPAGE_KEYS exactly.
 const TOTAL_STOPPAGE_FIELDS = STOPPAGE_FIELDS.filter((f) => f.key !== "plannedDowntimeMin");
+
 
 // ── Calculated (derived) columns shown in the sheet, in order ────────────
 // Each entry: key inside e.calculated, label, and the exact formula text
@@ -106,14 +107,40 @@ const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality 
 const OVERTIME_FORMULA = "Overtime = max(0, Shift On − M/C Start) + max(0, M/C Off − Shift Off) — minutes the machine ran outside its scheduled Shift window";
 const DELAY_EARLY_FORMULA = "Start Delay = max(0, M/C Start − Shift On)  ·  Early Closed = max(0, Shift Off − M/C Off) — computed independently, so both can be non-zero on the same entry (e.g. machine starts late AND finishes early)";
 
-const buildInit = (machineId = "") => ({
+// Remembers the last Process picked in the Add Entry modal (across entries
+// and page reloads) so operators entering a run of rows for the same
+// Process don't have to reselect it every time.
+const LAST_PROCESS_KEY = "grindingEntry:lastProcess";
+const getLastProcess = () => {
+  try { return localStorage.getItem(LAST_PROCESS_KEY) || ""; } catch { return ""; }
+};
+const setLastProcess = (id) => {
+  try { if (id) localStorage.setItem(LAST_PROCESS_KEY, id); } catch { /* ignore */ }
+};
+
+// Links every entry saved from one multi-row submission so the sheet can
+// group them back into a single display row — see ProductionEntry model.
+const newBatchId = () =>
+  typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `batch-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+// Shared across every repeated entry row below (Process/M-C Name/Date/Operator
+// are picked once per modal, not per row).
+const buildSharedInit = (machineId = "") => ({
   date: new Date().toISOString().split("T")[0],
-  mcStartTime: "",
-  mcOffTime: "",
   machine: machineId,
   operator: "",
   shiftOnTime: "",
   shiftOffTime: "",
+});
+
+// One repeatable "Machine Timing, Size & Quantities" + its own paired
+// "Downtime & Stoppage Reasons" — the unit the "+ Add Another Entry" button
+// duplicates, each becoming its own saved production entry.
+const buildRow = () => ({
+  mcStartTime: "",
+  mcOffTime: "",
   sizeWidthMm: "",
   sizeHeightMm: "",
   thicknessMm: "",
@@ -148,6 +175,21 @@ const signedDiffMin = (from, to) => {
   let diff = (timeToMinutes(to) - timeToMinutes(from) + 1440) % 1440;
   if (diff > 720) diff -= 1440;
   return diff;
+};
+
+// True if two [start, off) M/C time windows for the same Machine/Date
+// overlap — each window is normalized to extend past midnight when off <=
+// start (a shift crossing into the next day), so the same machine can't be
+// claimed as running two different jobs at once within one submission.
+const timeWindowsOverlap = (aStart, aOff, bStart, bOff) => {
+  const norm = (start, off) => {
+    let s = timeToMinutes(start), e = timeToMinutes(off);
+    if (e <= s) e += 1440;
+    return [s, e];
+  };
+  const [aS, aE] = norm(aStart, aOff);
+  const [bS, bE] = norm(bStart, bOff);
+  return aS < bE && bS < aE;
 };
 
 // Overtime / Start Delay / Early Closed, derived from the selected Shift's
@@ -200,48 +242,67 @@ const computeIdealProductionQty = (v) => {
 };
 
 // ── Client-side validation ────────────────────────────────────────────────
-const validate = (v) => {
+// Shared fields — Process/M-C Name/Date/Operator, picked once per modal.
+const validateShared = (v) => {
   const e = {};
   if (!v.date) e.date = "Date is required";
-
-  const timeRx = /^([01]\d|2[0-3]):([0-5]\d)$/;
-  if (!v.mcStartTime) e.mcStartTime = "M/C Start Time is required";
-  else if (!timeRx.test(v.mcStartTime)) e.mcStartTime = "Use HH:mm format";
-  if (!v.mcOffTime) e.mcOffTime = "M/C Off Time is required";
-  else if (!timeRx.test(v.mcOffTime)) e.mcOffTime = "Use HH:mm format";
-  else if (!e.mcStartTime && v.mcStartTime === v.mcOffTime) e.mcOffTime = "Off Time cannot equal Start Time";
-
   if (!v.process) e.process = "Please select a process";
   if (!v.machine) e.machine = "Please select a machine";
   if (!v.operator) e.operator = "Please select an operator";
-  if (!v.sizeWidthMm) e.sizeWidthMm = "Width is required";
-  if (!v.sizeHeightMm) e.sizeHeightMm = "Height is required";
-  if (!v.thicknessMm) e.thicknessMm = "Thickness is required";
-  if (!v.standardTimePerPieceMin) e.standardTimePerPieceMin = "Standard Time is required";
-  else if (isNaN(Number(v.standardTimePerPieceMin)) || Number(v.standardTimePerPieceMin) <= 0) e.standardTimePerPieceMin = "Must be a number > 0";
 
-  const pq = Number(v.processQty);
-  if (v.processQty === "") e.processQty = "Production Qty is required";
+  // Shift On/Off Time is editable (overriding the Machine's auto-filled
+  // default) — required so it can't be cleared and submitted blank, which
+  // would defeat the snapshot design by making the server silently re-fetch
+  // the Machine's CURRENT shift time instead.
+  const timeRx = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  if (!v.shiftOnTime) e.shiftOnTime = "Shift On Time is required";
+  else if (!timeRx.test(v.shiftOnTime)) e.shiftOnTime = "Use HH:mm format";
+  if (!v.shiftOffTime) e.shiftOffTime = "Shift Off Time is required";
+  else if (!timeRx.test(v.shiftOffTime)) e.shiftOffTime = "Use HH:mm format";
+
+  return e;
+};
+
+// One repeatable row — `shared` supplies shiftOnTime/shiftOffTime (from the
+// selected Machine) for the capacity check, since those live outside the row.
+const validateRow = (row, shared) => {
+  const e = {};
+
+  const timeRx = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  if (!row.mcStartTime) e.mcStartTime = "M/C Start Time is required";
+  else if (!timeRx.test(row.mcStartTime)) e.mcStartTime = "Use HH:mm format";
+  if (!row.mcOffTime) e.mcOffTime = "M/C Off Time is required";
+  else if (!timeRx.test(row.mcOffTime)) e.mcOffTime = "Use HH:mm format";
+  else if (!e.mcStartTime && row.mcStartTime === row.mcOffTime) e.mcOffTime = "Off Time cannot equal Start Time";
+
+  if (!row.sizeWidthMm) e.sizeWidthMm = "Width is required";
+  if (!row.sizeHeightMm) e.sizeHeightMm = "Height is required";
+  if (!row.thicknessMm) e.thicknessMm = "Thickness is required";
+  if (!row.standardTimePerPieceMin) e.standardTimePerPieceMin = "Standard Time is required";
+  else if (isNaN(Number(row.standardTimePerPieceMin)) || Number(row.standardTimePerPieceMin) <= 0) e.standardTimePerPieceMin = "Must be a number > 0";
+
+  const pq = Number(row.processQty);
+  if (row.processQty === "") e.processQty = "Production Qty is required";
   else if (!Number.isInteger(pq) || pq < 1) e.processQty = "Must be a whole number ≥ 1";
-  else if (String(v.processQty).length > 30) e.processQty = "Cannot exceed 30 digits";
+  else if (String(row.processQty).length > 30) e.processQty = "Cannot exceed 30 digits";
 
-  const oq = Number(v.okQty);
-  if (v.okQty === "") e.okQty = "OK Qty is required";
+  const oq = Number(row.okQty);
+  if (row.okQty === "") e.okQty = "OK Qty is required";
   else if (!Number.isInteger(oq) || oq < 0) e.okQty = "Must be a whole number ≥ 0";
-  else if (String(v.okQty).length > 30) e.okQty = "Cannot exceed 30 digits";
+  else if (String(row.okQty).length > 30) e.okQty = "Cannot exceed 30 digits";
 
   if (!e.processQty && !e.okQty && oq > pq)
     e.okQty = "OK Qty cannot exceed Production Qty";
 
   for (const f of STOPPAGE_FIELDS) {
-    const val = v[f.key];
+    const val = row[f.key];
     if (val === "" || val === null || val === undefined) continue;
     const n = Number(val);
     if (isNaN(n) || n < 0 || n > 1440) e[f.key] = "0–1440 min";
   }
 
-  const othersRemark = (v.othersRemark || "").trim();
-  if (Number(v.othersMin) > 0 && !othersRemark) e.othersRemark = "Remark is required when Others is greater than 0";
+  const othersRemark = (row.othersRemark || "").trim();
+  if (Number(row.othersMin) > 0 && !othersRemark) e.othersRemark = "Remark is required when Others is greater than 0";
   else if (othersRemark.length > 300) e.othersRemark = "Cannot exceed 300 characters";
 
   // Capacity check: can't process more pieces than the Available Working
@@ -250,7 +311,7 @@ const validate = (v) => {
   // more basic errors above.
   const stoppageFieldsClean = STOPPAGE_FIELDS.every((f) => !e[f.key]);
   if (!e.mcStartTime && !e.mcOffTime && !e.standardTimePerPieceMin && !e.processQty && stoppageFieldsClean) {
-    const idealProductionQty = computeIdealProductionQty(v);
+    const idealProductionQty = computeIdealProductionQty({ ...row, shiftOnTime: shared.shiftOnTime, shiftOffTime: shared.shiftOffTime });
     if (idealProductionQty === null) {
       e.processQty =
         `Not achievable: Available Working Time is NA — Planned Downtime + total Stoppage consumes the entire ` +
@@ -585,6 +646,22 @@ const fmtDelayOrEarly = (startDelayMin, earlyClosedMin) => {
   return parts.length > 0 ? parts.join(" / ") : "—";
 };
 
+// A sheet cell for a per-entry column, stacking one line per entry in a
+// batch (see `batchId` on the model) — a single-entry "batch" renders
+// identically to the old plain cell (one line, no divider). `className`
+// should be the exact className the plain `<td>` used before, minus its
+// `py-2` (moved onto each stacked line instead, so a lone item still gets
+// the same padding it always had).
+const StackedCell = ({ className, items }) => (
+  <td className={className}>
+    <div className="flex flex-col">
+      {items.map((node, i) => (
+        <div key={i} className={`py-2 ${i > 0 ? "border-t border-slate-200 dark:border-slate-700" : ""}`}>{node}</div>
+      ))}
+    </div>
+  </td>
+);
+
 const ShiftTimeReportModal = ({ onClose }) => {
   const toast = useAlert() || toastify;
   const { data: machines = [] } = useMachines();
@@ -707,10 +784,24 @@ const GrindingEntry = () => {
   const [entries, setEntries] = useState([]);
   const [loadingSheet, setLoadingSheet] = useState(false);
   const [showModal, setShowModal] = useState(false);
-  const [values, setValues] = useState(buildInit());
-  const [formErrors, setFormErrors] = useState({});
+  const [values, setValues] = useState(buildSharedInit()); // shared: date/machine/operator/shift times
+  const [formErrors, setFormErrors] = useState({}); // shared-field errors
+  const [rows, setRows] = useState([buildRow()]); // repeatable Machine Timing + Downtime entries
+  const [rowErrors, setRowErrors] = useState([{}]); // one error object per row
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Which row is expanded in the Add/Edit modal — collapsed (-1) by default
+  // for a new entry (keeps the fast path short), auto-opened on edit and
+  // whenever a submit fails validation on a field hidden inside a row.
+  const [openRowIndex, setOpenRowIndex] = useState(-1);
+  // Sticky for the life of one modal session (not regenerated per submit
+  // attempt) so a retry after a partial failure keeps every row in the same
+  // batch instead of splintering into a second one. `originalBatchId` is the
+  // edited entry's own batch link (if any), read once in openEdit, so that
+  // adding rows during an edit rejoins its real siblings instead of
+  // fragmenting them into a brand-new batch.
+  const [batchId, setBatchId] = useState(null);
+  const [originalBatchId, setOriginalBatchId] = useState(null);
   const [openFormula, setOpenFormula] = useState(null); // { key, label, formula, rect } | null
   const [openRemark, setOpenRemark] = useState(null); // { id, text, rect } | null
   const [showEfficiency, setShowEfficiency] = useState(false);
@@ -719,6 +810,9 @@ const GrindingEntry = () => {
   const [editId, setEditId] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
   const [isDeleteLoading, setIsDeleteLoading] = useState(false);
+  // Index of the in-form entry (row) pending removal confirmation — separate
+  // from deleteId above, which confirms deleting an already-saved sheet row.
+  const [deleteRowIndex, setDeleteRowIndex] = useState(null);
 
   // Scroll sync refs
   const topScrollRef = React.useRef(null);
@@ -809,16 +903,14 @@ const GrindingEntry = () => {
   const handleProcessSelect = (e) => {
     const val = e.target.value;
     setFormProcess(val);
-    setValues((prev) => ({
-      ...prev,
-      machine: "",
-      sizeWidthMm: "",
-      sizeHeightMm: "",
-      thicknessMm: "",
-      standardTimePerPieceMin: "",
-      shiftOnTime: "",
-      shiftOffTime: "",
-    }));
+    setLastProcess(val);
+    setValues((prev) => ({ ...prev, machine: "", shiftOnTime: "", shiftOffTime: "" }));
+    // A different Process implies a different Machine list, which
+    // invalidates whatever Size/Thickness rows were already filled in —
+    // start over with a single blank row rather than leave stale data.
+    setRows([buildRow()]);
+    setRowErrors([{}]);
+    setOpenRowIndex(-1);
     setStdTimes([]);
   };
 
@@ -894,6 +986,31 @@ const GrindingEntry = () => {
     });
   }, [entries, debouncedSheetSearch, machines]);
 
+  // Entries saved together from one multi-row "Add Entry" submission share a
+  // batchId — group them back into one array so the sheet renders them as a
+  // single row (with per-entry columns stacked) instead of separate rows.
+  // Entries without a batchId (the common case) become their own group of 1.
+  const groupedEntries = useMemo(() => {
+    const groups = [];
+    const byBatch = new Map();
+    for (const e of filteredEntries) {
+      if (e.batchId) {
+        let group = byBatch.get(e.batchId);
+        if (!group) { group = []; byBatch.set(e.batchId, group); groups.push(group); }
+        group.push(e);
+      } else {
+        groups.push([e]);
+      }
+    }
+    // The sheet fetches newest-first (createdAt desc), so a batch's entries
+    // arrive in the reverse of the order they were typed — re-sort each
+    // group oldest-first so Entry 1 stacks above Entry 2, matching the form.
+    for (const group of groups) {
+      if (group.length > 1) group.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    }
+    return groups;
+  }, [filteredEntries]);
+
   // Fetch standard times when machine changes in modal
   const fetchStdTimes = (machineId) => {
     if (!machineId) { setStdTimes([]); return; }
@@ -915,58 +1032,126 @@ const GrindingEntry = () => {
     });
   }, [stdTimes]);
 
-  const handleSizeChange = (e) => {
+  // Applies a partial patch (or updater function) to one row by index.
+  const updateRow = (index, patch) => {
+    setRows((prev) => prev.map((row, i) => (i !== index ? row : (typeof patch === "function" ? patch(row) : { ...row, ...patch }))));
+  };
+
+  const handleRowChange = (index, e) => {
+    const { name, value } = e.target;
+    updateRow(index, { [name]: value });
+  };
+
+  const handleSizeChange = (index, e) => {
     const val = e.target.value;
     if (!val) {
-      setValues((prev) => ({ ...prev, sizeWidthMm: "", sizeHeightMm: "", thicknessMm: "", standardTimePerPieceMin: "" }));
+      updateRow(index, { sizeWidthMm: "", sizeHeightMm: "", thicknessMm: "", standardTimePerPieceMin: "" });
       return;
     }
     const [w, h] = val.split("x");
-    setValues((prev) => ({ ...prev, sizeWidthMm: w, sizeHeightMm: h, thicknessMm: "", standardTimePerPieceMin: "" }));
+    updateRow(index, { sizeWidthMm: w, sizeHeightMm: h, thicknessMm: "", standardTimePerPieceMin: "" });
   };
 
-  const handleThicknessChange = (e) => {
-    setValues((prev) => ({ ...prev, thicknessMm: e.target.value }));
+  // Standard Time always comes from the Standard Time Master, never typed —
+  // resolved directly here (instead of a reactive effect) since it depends
+  // on which row's Thickness changed.
+  const handleThicknessChange = (index, e) => {
+    const thicknessMm = e.target.value;
+    updateRow(index, (row) => {
+      const match = stdTimes.find(
+        (s) =>
+          String(s.sizeWidthMm) === String(row.sizeWidthMm) &&
+          String(s.sizeHeightMm) === String(row.sizeHeightMm) &&
+          String(s.thicknessMm) === String(thicknessMm),
+      );
+      return { ...row, thicknessMm, standardTimePerPieceMin: match ? String(match.standardTimeMin) : "" };
+    });
   };
 
-  const uniqueThicknesses = useMemo(() => {
-    if (!values.sizeWidthMm || !values.sizeHeightMm) return [];
+  // Thickness options for one row's already-selected Size.
+  const getUniqueThicknesses = (row) => {
+    if (!row.sizeWidthMm || !row.sizeHeightMm) return [];
     const opts = new Set(
       stdTimes.filter(
-        (s) => String(s.sizeWidthMm) === String(values.sizeWidthMm) &&
-               String(s.sizeHeightMm) === String(values.sizeHeightMm)
+        (s) => String(s.sizeWidthMm) === String(row.sizeWidthMm) &&
+               String(s.sizeHeightMm) === String(row.sizeHeightMm)
       ).map((s) => s.thicknessMm)
     );
     // Editing an older entry saved before manual thickness entry was removed
     // may reference a thickness no longer in the master list — keep it
     // selectable instead of silently dropping it from the dropdown.
-    if (editId && values.thicknessMm) opts.add(values.thicknessMm);
+    if (editId && row.thicknessMm) opts.add(row.thicknessMm);
     return [...opts].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
-  }, [stdTimes, values.sizeWidthMm, values.sizeHeightMm, editId, values.thicknessMm]);
+  };
 
-  // Auto-fetch standard time whenever all three dimensions are selected —
-  // Standard Time always comes from the Standard Time Master, never typed.
+  // Re-syncs every row's Standard Time against the master list whenever it
+  // (re)loads — covers the edit-open path, where a row's Size/Thickness/
+  // Standard Time are all set immediately from the saved entry before
+  // fetchStdTimes's async request has resolved, so nothing else would ever
+  // correct a value that's since changed in the Standard Time Master.
   useEffect(() => {
-    if (!values.sizeWidthMm || !values.sizeHeightMm || !values.thicknessMm) {
-      setValues((prev) => ({ ...prev, standardTimePerPieceMin: "" }));
-      return;
+    if (!stdTimes.length) return;
+    setRows((prev) => prev.map((row) => {
+      if (!row.sizeWidthMm || !row.sizeHeightMm || !row.thicknessMm) return row;
+      const match = stdTimes.find((s) =>
+        String(s.sizeWidthMm) === String(row.sizeWidthMm) &&
+        String(s.sizeHeightMm) === String(row.sizeHeightMm) &&
+        String(s.thicknessMm) === String(row.thicknessMm)
+      );
+      // No match means this Size/Thickness combo no longer has a Standard
+      // Time in the master (e.g. removed since this entry was saved) — clear
+      // it rather than keep showing a stale value as if it were still valid.
+      const nextStd = match ? String(match.standardTimeMin) : "";
+      return nextStd === row.standardTimePerPieceMin ? row : { ...row, standardTimePerPieceMin: nextStd };
+    }));
+  }, [stdTimes]);
+
+  const addRow = () => {
+    setRows((prev) => [...prev, buildRow()]);
+    setRowErrors((prev) => [...prev, {}]);
+    setOpenRowIndex(rows.length); // index of the row about to be appended
+  };
+
+  const removeRow = (index) => {
+    // This row may already be a real saved record — either the entry being
+    // edited, or one created during an earlier partial-batch-save retry
+    // (tracked via __entryId). Removing it from the form must also delete
+    // it for real, or it silently survives in the database, invisible to
+    // this session but still showing up in the sheet.
+    const removedEntryId = rows[index]?.__entryId;
+    if (removedEntryId) {
+      deleteProductionEntry(removedEntryId)
+        .then(() => fetchSheet())
+        .catch(() => toast.error?.("Failed to remove the already-saved entry — it may still exist in the sheet."));
     }
-    const match = stdTimes.find(
-      (s) =>
-        String(s.sizeWidthMm) === String(values.sizeWidthMm) &&
-        String(s.sizeHeightMm) === String(values.sizeHeightMm) &&
-        String(s.thicknessMm) === String(values.thicknessMm),
-    );
-    setValues((prev) => ({ ...prev, standardTimePerPieceMin: match ? String(match.standardTimeMin) : "" }));
-  }, [values.sizeWidthMm, values.sizeHeightMm, values.thicknessMm, stdTimes]);
+    setRows((prev) => prev.filter((_, i) => i !== index));
+    setRowErrors((prev) => prev.filter((_, i) => i !== index));
+    setOpenRowIndex((prev) => (prev === index ? -1 : prev > index ? prev - 1 : prev));
+  };
 
   const openModal = () => {
-    const initMachine = activeMachine || "";
-    setValues(buildInit(initMachine));
+    // Pre-select whichever Process was last used, only if it still exists.
+    const remembered = getLastProcess();
+    const resolvedProcess = remembered && processes.some((p) => p._id === remembered) ? remembered : "";
+    // Only pre-seed the Machine filter from the sheet's active-machine filter
+    // if it actually belongs to the resolved Process — otherwise the Machine
+    // <select> would show no matching option while `values.machine` still
+    // silently held a value the user never visibly confirmed.
+    const candidateMachine = activeMachine || "";
+    const machineFitsProcess = !resolvedProcess || !candidateMachine || machines.some((m) =>
+      m._id === candidateMachine && (m.processes || []).some((p) => (typeof p === "object" ? p._id : p) === resolvedProcess)
+    );
+    const initMachine = machineFitsProcess ? candidateMachine : "";
+    setValues(buildSharedInit(initMachine));
+    setRows([buildRow()]);
+    setRowErrors([{}]);
+    setOpenRowIndex(-1);
     setEditId(null);
+    setBatchId(null);
+    setOriginalBatchId(null);
     setFormErrors({});
     setSubmitted(false);
-    setFormProcess("");
+    setFormProcess(resolvedProcess);
     fetchStdTimes(initMachine);
     setShowModal(true);
   };
@@ -978,8 +1163,6 @@ const GrindingEntry = () => {
     const machineObj = machines.find((m) => m._id === machineId);
     setValues({
       date: new Date(e.date).toISOString().split("T")[0],
-      mcStartTime: e.mcStartTime || "",
-      mcOffTime: e.mcOffTime || "",
       machine: machineId,
       operator: e.operator?._id || "",
       // The entry's own snapshot, not the machine's current config — if
@@ -989,20 +1172,33 @@ const GrindingEntry = () => {
       // entries saved before snapshotting existed.
       shiftOnTime: e.shiftOnTime || machineObj?.machineOnTime || "",
       shiftOffTime: e.shiftOffTime || machineObj?.machineOffTime || "",
+    });
+    // Editing always starts from the single existing record as row 0 — any
+    // further rows added from here are saved as brand-new entries, joining
+    // this entry's existing batch (if any) rather than fragmenting it.
+    setBatchId(e.batchId || null);
+    setOriginalBatchId(e.batchId || null);
+    setRows([{
+      __entryId: e._id,
+      mcStartTime: e.mcStartTime || "",
+      mcOffTime: e.mcOffTime || "",
       sizeWidthMm: e.sizeWidthMm || "",
       sizeHeightMm: e.sizeHeightMm || "",
       thicknessMm: e.thicknessMm || "",
       standardTimePerPieceMin: e.standardTimePerPieceMin || "",
       processQty: e.processQty || "0",
       okQty: e.okQty || "0",
-      rejectedQty: e.rejectedQty || "0",
       othersRemark: e.othersRemark || "",
       ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, String(e[f.key] || "0")])),
-    });
+    }]);
+    setRowErrors([{}]);
     setFormErrors({});
     setSubmitted(false);
     const firstProcess = machineObj?.processes?.[0];
     setFormProcess(firstProcess ? (typeof firstProcess === "object" ? firstProcess._id : firstProcess) : "");
+    // Editing an existing entry already has these fields filled in, so show
+    // them right away instead of hiding known-good data behind a "+".
+    setOpenRowIndex(0);
     fetchStdTimes(machineId);
     setShowModal(true);
   };
@@ -1038,13 +1234,12 @@ const GrindingEntry = () => {
       setValues((prev) => ({
         ...prev,
         machine: value,
-        sizeWidthMm: "",
-        sizeHeightMm: "",
-        thicknessMm: "",
-        standardTimePerPieceMin: "",
         shiftOnTime: machineObj?.machineOnTime || "",
         shiftOffTime: machineObj?.machineOffTime || "",
       }));
+      // A different Machine may not offer the same sizes — every row's
+      // Size/Thickness/Standard Time (all machine-dependent) resets.
+      setRows((prev) => prev.map((row) => ({ ...row, sizeWidthMm: "", sizeHeightMm: "", thicknessMm: "", standardTimePerPieceMin: "" })));
       fetchStdTimes(value);
     } else {
       setValues((prev) => ({ ...prev, [name]: value }));
@@ -1053,36 +1248,122 @@ const GrindingEntry = () => {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    const errors = validate({ ...values, process: formProcess });
-    setFormErrors(errors);
+    const shared = { ...values, process: formProcess };
+    const sharedErrors = validateShared(shared);
+    const perRowErrors = rows.map((row) => validateRow(row, values));
+
+    // Cross-row check: two entries in the same submission can't claim
+    // overlapping M/C time on the same Machine/Date — each row's own
+    // validateRow only checks itself in isolation, so this can only run once
+    // every row's own time fields are already individually valid.
+    if (rows.length > 1) {
+      for (let i = 0; i < rows.length; i++) {
+        if (perRowErrors[i].mcStartTime || perRowErrors[i].mcOffTime) continue;
+        for (let j = i + 1; j < rows.length; j++) {
+          if (perRowErrors[j].mcStartTime || perRowErrors[j].mcOffTime) continue;
+          if (timeWindowsOverlap(rows[i].mcStartTime, rows[i].mcOffTime, rows[j].mcStartTime, rows[j].mcOffTime)) {
+            perRowErrors[i].mcOffTime = perRowErrors[i].mcOffTime || `Overlaps with Entry ${j + 1}'s M/C time — the same machine can't run two jobs at once.`;
+            perRowErrors[j].mcOffTime = perRowErrors[j].mcOffTime || `Overlaps with Entry ${i + 1}'s M/C time — the same machine can't run two jobs at once.`;
+          }
+        }
+      }
+    }
+
+    setFormErrors(sharedErrors);
+    setRowErrors(perRowErrors);
     setSubmitted(true);
-    if (Object.keys(errors).length > 0) return;
+
+    const firstBadRow = perRowErrors.findIndex((e) => Object.keys(e).length > 0);
+    if (firstBadRow !== -1) setOpenRowIndex(firstBadRow);
+
+    const hasErrors = Object.keys(sharedErrors).length > 0 || firstBadRow !== -1;
+    if (hasErrors) return;
 
     setSaving(true);
-    const apiCall = editId 
-      ? updateProductionEntry(editId, values) 
-      : createProductionEntry(values);
+    // Sticky for this modal session — reused across a retry after a partial
+    // failure so already-saved rows and newly-saved ones end up in the same
+    // batch instead of splintering, and prefers the edited entry's own
+    // existing batch (if any) so adding rows during an edit rejoins its real
+    // siblings rather than fragmenting them into a new one. Only assigned at
+    // all once there's actually more than one row.
+    let effectiveBatchId = batchId;
+    if (rows.length > 1 && !effectiveBatchId) {
+      effectiveBatchId = originalBatchId || newBatchId();
+      setBatchId(effectiveBatchId);
+    }
+    const buildPayload = (row) => {
+      const { __entryId, ...rowFields } = row;
+      return {
+        date: values.date,
+        machine: values.machine,
+        operator: values.operator,
+        shiftOnTime: values.shiftOnTime,
+        shiftOffTime: values.shiftOffTime,
+        ...(effectiveBatchId ? { batchId: effectiveBatchId } : {}),
+        ...rowFields,
+      };
+    };
 
-    apiCall
-      .then((res) => {
-        if (res.data.isOk) {
-          toast.success?.(`Entry ${editId ? 'updated' : 'saved'}!`);
-          setShowModal(false);
-          fetchSheet();
+    // Sequential, not Promise.all — each row becomes its own saved record via
+    // the single-entry endpoint (there's no bulk-create API). A row that
+    // already saved in a prior attempt carries __entryId (set the instant
+    // its own request succeeds) and is UPDATED rather than re-created on a
+    // retry, so fixing one failed row and resubmitting can never duplicate
+    // the rows that already went through.
+    (async () => {
+      let savedCount = 0;
+      let updatedExisting = false;
+      let createdNew = 0;
+      try {
+        for (let i = 0; i < rows.length; i++) {
+          const payload = buildPayload(rows[i]);
+          const existingId = rows[i].__entryId;
+          try {
+            const res = existingId
+              ? await updateProductionEntry(existingId, payload)
+              : await createProductionEntry(payload);
+            if (!existingId) {
+              const newId = res.data?.data?._id;
+              const idx = i;
+              if (newId) setRows((prev) => prev.map((r, ri) => (ri === idx ? { ...r, __entryId: newId } : r)));
+              createdNew++;
+            } else {
+              updatedExisting = true;
+            }
+            savedCount++;
+          } catch (rowErr) {
+            rowErr.rowIndex = i;
+            throw rowErr;
+          }
         }
-      })
-      .catch((err) => {
+        const message = updatedExisting
+          ? (createdNew > 0 ? `Entry updated, ${createdNew} new ${createdNew === 1 ? "entry" : "entries"} saved!` : "Entry updated!")
+          : `${savedCount} ${savedCount === 1 ? "entry" : "entries"} saved!`;
+        toast.success?.(message);
+        setShowModal(false);
+        fetchSheet();
+      } catch (err) {
+        const failedIndex = err.rowIndex ?? rows.length - 1;
         const apiErrors = err.response?.data?.errors;
-        if (apiErrors) setFormErrors((prev) => ({ ...prev, ...apiErrors }));
-        toast.error?.(err.response?.data?.message || `Failed to ${editId ? 'update' : 'save'} entry`);
-      })
-      .finally(() => setSaving(false));
+        if (apiErrors) setRowErrors((prev) => prev.map((re, ri) => (ri === failedIndex ? { ...re, ...apiErrors } : re)));
+        setOpenRowIndex(failedIndex);
+        toast.error?.(
+          savedCount > 0
+            ? `Saved ${savedCount} of ${rows.length} — stopped at Entry ${failedIndex + 1}: ${err.response?.data?.message || err.message}. Fix it and Save again — already-saved entries won't be duplicated.`
+            : (err.response?.data?.message || `Failed to ${editId ? "update" : "save"} entry`)
+        );
+        if (savedCount > 0) fetchSheet();
+      } finally {
+        setSaving(false);
+      }
+    })();
   };
 
   const fmt = (n, unit = "") => (n == null || isNaN(n) ? "NA" : `${Number(n).toFixed(2)}${unit ? ` ${unit}` : ""}`);
   const fmtRatioPct = (n) => (n == null || isNaN(n) ? "NA" : `${(Number(n) * 100).toFixed(2)}%`);
   const UNIT_BY_CALC_KEY = useMemo(() => Object.fromEntries(CALC_COLUMNS.map((c) => [c.key, c.unit])), []);
   const err = (name) => submitted && formErrors[name] ? formErrors[name] : null;
+  const rowErr = (rowIndex, name) => submitted && rowErrors[rowIndex]?.[name] ? rowErrors[rowIndex][name] : null;
 
   return (
     <div className="w-full">
@@ -1246,42 +1527,45 @@ const GrindingEntry = () => {
                 {loadingSheet ? "Loading…" : sheetSearch ? "No entries match your search." : "No entries for this machine yet."}
               </td></tr>
             )}
-            {filteredEntries.map((e) => {
-              const mName = typeof e.machine === "object" ? e.machine?.machineName : machines.find(m => m._id === e.machine)?.machineName;
-              const c = e.calculated || {};
-              const editable = isEntryEditable(parseLocalDate(e.date));
+            {groupedEntries.map((group) => {
+              const first = group[0];
+              const mName = typeof first.machine === "object" ? first.machine?.machineName : machines.find(m => m._id === first.machine)?.machineName;
               return (
-              <tr key={e._id} className="border-b border-slate-300 dark:border-slate-700 hover:bg-slate-50/60 transition-colors">
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{new Date(e.date).toLocaleDateString()}</td>
+              <tr key={group.map((e) => e._id).join("-")} className="border-b border-slate-300 dark:border-slate-700 hover:bg-slate-50/60 transition-colors">
+                {/* Shared across the whole batch — Date/Machine/Operator/Shift are picked once per submission */}
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{new Date(first.date).toLocaleDateString()}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-medium">{mName || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.operator?.name || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcStartTime || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs">{e.mcOffTime || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shiftOnTime || (typeof e.machine === "object" ? e.machine?.machineOnTime : null) || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{e.shiftOffTime || (typeof e.machine === "object" ? e.machine?.machineOffTime : null) || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{first.operator?.name || "—"}</td>
+                {/* M/C Start / M/C Off — one per entry in the batch */}
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs" items={group.map((e) => e.mcStartTime || "—")} />
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs" items={group.map((e) => e.mcOffTime || "—")} />
+
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{first.shiftOnTime || (typeof first.machine === "object" ? first.machine?.machineOnTime : null) || "—"}</td>
+                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{first.shiftOffTime || (typeof first.machine === "object" ? first.machine?.machineOffTime : null) || "—"}</td>
 
                 {/* Overtime / Start Delay / Early Closed */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtMin(c.overtimeMin)}</td>
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtDelayOrEarly(c.startDelayMin, c.earlyClosedMin)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtMin((e.calculated || {}).overtimeMin))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtDelayOrEarly((e.calculated || {}).startDelayMin, (e.calculated || {}).earlyClosedMin))} />
 
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.sizeWidthMm}×{e.sizeHeightMm}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.thicknessMm} mm</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmt(e.standardTimePerPieceMin, "min")}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.processQty} qty</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{e.okQty} qty</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold">{Number(e.processQty) - Number(e.okQty)} qty</td>
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.sizeWidthMm}×${e.sizeHeightMm}`)} />
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.thicknessMm} mm`)} />
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => fmt(e.standardTimePerPieceMin, "min"))} />
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.processQty} qty`)} />
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.okQty} qty`)} />
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold" items={group.map((e) => `${Number(e.processQty) - Number(e.okQty)} qty`)} />
 
                 {/* Working Schedule Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.workingScheduleMin, UNIT_BY_CALC_KEY.workingScheduleMin)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).workingScheduleMin, UNIT_BY_CALC_KEY.workingScheduleMin))} />
 
                 {/* Individual stoppage reason values */}
                 {STOPPAGE_FIELDS.map((f) => (
-                  <td key={f.key} className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{fmt(e[f.key], "min")}</td>
+                  <StackedCell key={f.key} className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => fmt(e[f.key], "min"))} />
                 ))}
 
                 {/* Remark — hidden by default, "eye" opens a popover with the Others-downtime note */}
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-center">
+                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-center" items={group.map((e) => (
                   <button
+                    key={e._id}
                     type="button"
                     onClick={(ev) => {
                       ev.stopPropagation();
@@ -1293,63 +1577,73 @@ const GrindingEntry = () => {
                   >
                     <Eye className="w-4 h-4" />
                   </button>
-                </td>
+                ))} />
 
                 {/* Total Stoppage */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.totalStoppageMin, UNIT_BY_CALC_KEY.totalStoppageMin)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).totalStoppageMin, UNIT_BY_CALC_KEY.totalStoppageMin))} />
                 {/* Available Working Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.availableWorkingMin, UNIT_BY_CALC_KEY.availableWorkingMin)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).availableWorkingMin, UNIT_BY_CALC_KEY.availableWorkingMin))} />
                 {/* Ideal Production */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.idealProductionQty, UNIT_BY_CALC_KEY.idealProductionQty)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).idealProductionQty, UNIT_BY_CALC_KEY.idealProductionQty))} />
                 {/* Effective M/C Run Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.effectiveMcRunTimeMin, UNIT_BY_CALC_KEY.effectiveMcRunTimeMin)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).effectiveMcRunTimeMin, UNIT_BY_CALC_KEY.effectiveMcRunTimeMin))} />
                 {/* Unreported Time */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmt(c.unreportedTimeMin, UNIT_BY_CALC_KEY.unreportedTimeMin)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).unreportedTimeMin, UNIT_BY_CALC_KEY.unreportedTimeMin))} />
 
                 {/* Availability / Performance / Quality Ratios */}
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtRatioPct(c.availabilityRatio)}</td>
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtRatioPct(c.performanceRatio)}</td>
-                <td className="px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{fmtRatioPct(c.qualityRatio)}</td>
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtRatioPct((e.calculated || {}).availabilityRatio))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtRatioPct((e.calculated || {}).performanceRatio))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtRatioPct((e.calculated || {}).qualityRatio))} />
 
                 {/* OEE % */}
-                <td className="sticky right-[90px] z-10 px-3 py-2 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-blue-50 dark:bg-slate-900 font-bold text-brand-700 dark:text-brand-300 shadow-[-4px_0_10px_rgba(0,0,0,0.05)] w-[100px] min-w-[100px] max-w-[100px]">
-                  {fmt(c.oeePercent)}{c.oeePercent == null || isNaN(c.oeePercent) ? "" : "%"}
-                </td>
+                <StackedCell
+                  className="sticky right-[90px] z-10 px-3 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-blue-50 dark:bg-slate-900 font-bold text-brand-700 dark:text-brand-300 shadow-[-4px_0_10px_rgba(0,0,0,0.05)] w-[100px] min-w-[100px] max-w-[100px]"
+                  items={group.map((e) => {
+                    const c = e.calculated || {};
+                    return <React.Fragment key={e._id}>{fmt(c.oeePercent)}{c.oeePercent == null || isNaN(c.oeePercent) ? "" : "%"}</React.Fragment>;
+                  })}
+                />
 
-                <td className="sticky right-0 z-10 w-[90px] px-3 py-2 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] shadow-[-4px_0_10px_rgba(0,0,0,0.05)]">
-                  <div className="flex justify-end gap-2">
-                    {currentPagePermissions.edit && (
-                      editable ? (
-                        <button onClick={() => openEdit(e)}
-                          className="p-1.5 rounded-lg hover:bg-slate-100 dark:bg-slate-800 text-slate-500 transition-colors" title="Edit">
-                          <Pencil className="w-4 h-4" />
-                        </button>
-                      ) : (
-                        <span
-                          className="p-1.5 rounded-lg text-slate-300 dark:text-slate-700 cursor-not-allowed"
-                          title="Edit window closed (entries lock after 2 working days)"
-                        >
-                          <Pencil className="w-4 h-4" />
-                        </span>
-                      )
-                    )}
-                    {currentPagePermissions.delete && (
-                      editable ? (
-                        <button onClick={() => setDeleteId(e._id)}
-                          className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 transition-colors" title="Delete">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      ) : (
-                        <span
-                          className="p-1.5 rounded-lg text-slate-300 dark:text-slate-700 cursor-not-allowed"
-                          title="Edit window closed (entries lock after 2 working days)"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </span>
-                      )
-                    )}
-                  </div>
-                </td>
+                <StackedCell
+                  className="sticky right-0 z-10 w-[90px] px-3 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] shadow-[-4px_0_10px_rgba(0,0,0,0.05)]"
+                  items={group.map((e) => {
+                    const editable = isEntryEditable(parseLocalDate(e.date));
+                    return (
+                      <div key={e._id} className="flex justify-end gap-2">
+                        {currentPagePermissions.edit && (
+                          editable ? (
+                            <button onClick={() => openEdit(e)}
+                              className="p-1.5 rounded-lg hover:bg-slate-100 dark:bg-slate-800 text-slate-500 transition-colors" title="Edit">
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <span
+                              className="p-1.5 rounded-lg text-slate-300 dark:text-slate-700 cursor-not-allowed"
+                              title="Edit window closed (entries lock after 2 working days)"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </span>
+                          )
+                        )}
+                        {currentPagePermissions.delete && (
+                          editable ? (
+                            <button onClick={() => setDeleteId(e._id)}
+                              className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 transition-colors" title="Delete">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <span
+                              className="p-1.5 rounded-lg text-slate-300 dark:text-slate-700 cursor-not-allowed"
+                              title="Edit window closed (entries lock after 2 working days)"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </span>
+                          )
+                        )}
+                      </div>
+                    );
+                  })}
+                />
               </tr>
             )})}
           </tbody>
@@ -1364,6 +1658,12 @@ const GrindingEntry = () => {
         <div className="flex items-center justify-between mt-3 px-1 text-sm text-slate-600 dark:text-slate-300">
           <span>
             Showing {Math.min((page - 1) * PAGE_SIZE + 1, totalCount)}–{Math.min(page * PAGE_SIZE, totalCount)} of {totalCount}
+            {/* Grouped multi-entry submissions render as one row, so the
+                visible row count can be lower than the document range above
+                — call that out instead of leaving it looking like a mismatch. */}
+            {groupedEntries.length < entries.length && (
+              <span className="text-slate-400"> ({groupedEntries.length} rows shown — some are grouped multi-entry submissions)</span>
+            )}
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -1413,236 +1713,276 @@ const GrindingEntry = () => {
             <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
               <div className="px-5 py-4 space-y-3 overflow-y-auto">
 
-              {/* ── Section 1: Date & Time ── */}
-              <div>
-                <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Date &amp; Shift Timing</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-x-3 gap-y-1">
-
-                  {/* Date */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Date <span className="text-red-500">*</span></label>
-                    <DatePicker
-                      name="date"
-                      value={values.date}
-                      onChange={handleChange}
-                      hasError={!!err("date")}
-                      placeholder="Select date"
-                    />
-                    {err("date") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("date")}</p>}
-                  </div>
-
-                  {/* M/C Start Time */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Start Time <span className="text-red-500">*</span></label>
-                    <TimePicker
-                      name="mcStartTime"
-                      value={values.mcStartTime}
-                      onChange={handleChange}
-                      hasError={!!err("mcStartTime")}
-                      placeholder="--:--"
-                    />
-                    {err("mcStartTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("mcStartTime")}</p>}
-                  </div>
-
-                  {/* M/C Off Time */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Off Time <span className="text-red-500">*</span></label>
-                    <TimePicker
-                      name="mcOffTime"
-                      value={values.mcOffTime}
-                      onChange={handleChange}
-                      hasError={!!err("mcOffTime")}
-                      placeholder="--:--"
-                    />
-                    {err("mcOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("mcOffTime")}</p>}
-                  </div>
-
-                  {/* Shift On/Off Time — read-only, from the selected Machine's
-                      own Shift Time Start/End (Machine Master). Overtime/Start
-                      Delay/Early Closed are derived from these vs. M/C
-                      Start/Off Time, not entered manually. */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Shift On Time</label>
-                    <input type="text" readOnly value={values.shiftOnTime || "—"}
-                      className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default font-mono" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Shift Off Time</label>
-                    <input type="text" readOnly value={values.shiftOffTime || "—"}
-                      className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default font-mono" />
-                  </div>
-
+              {/* ── Line 1: Process (auto-selected) + M/C Name ── */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Process <span className="text-red-500">*</span></label>
+                  <select value={formProcess} onChange={handleProcessSelect} className={cls(err("process"))}>
+                    <option value="">Select Process</option>
+                    {processes.map((p) => <option key={p._id} value={p._id}>{p.processName}</option>)}
+                  </select>
+                  {err("process") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("process")}</p>}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Name <span className="text-red-500">*</span></label>
+                  <select name="machine" value={values.machine} onChange={handleChange} disabled={!formProcess} className={cls(err("machine"))}>
+                    <option value="">{formProcess ? "Select Machine" : "Select process first"}</option>
+                    {formMachines.map((m) => <option key={m._id} value={m._id}>{m.machineName}</option>)}
+                  </select>
+                  {err("machine") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("machine")}</p>}
                 </div>
               </div>
 
-              {/* ── Section 2: Machine & Glass Spec ── */}
-              <div>
-                <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Machine &amp; Glass Specification</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
-
-                  {/* Process — required, and gates the M/C Name dropdown below */}
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Process <span className="text-red-500">*</span></label>
-                    <select value={formProcess} onChange={handleProcessSelect} className={cls(err("process"))}>
-                      <option value="">Select Process</option>
-                      {processes.map((p) => <option key={p._id} value={p._id}>{p.processName}</option>)}
-                    </select>
-                    {err("process") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("process")}</p>}
-                  </div>
-
-                  {/* M/C Name & Operator */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Name <span className="text-red-500">*</span></label>
-                    <select name="machine" value={values.machine} onChange={handleChange} disabled={!formProcess} className={cls(err("machine"))}>
-                      <option value="">{formProcess ? "Select Machine" : "Select process first"}</option>
-                      {formMachines.map((m) => <option key={m._id} value={m._id}>{m.machineName}</option>)}
-                    </select>
-                    {err("machine") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("machine")}</p>}
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Operator <span className="text-red-500">*</span></label>
-                    <select name="operator" value={values.operator} onChange={handleChange} className={cls(err("operator"))}>
-                      <option value="">Select Operator</option>
-                      {operators.map((op) => <option key={op._id} value={op._id}>{op.name}</option>)}
-                    </select>
-                    {err("operator") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("operator")}</p>}
-                  </div>
-
-                  {/* Size (Width x Height) */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Size (mm) <span className="text-red-500">*</span></label>
-                    <select
-                      value={(values.sizeWidthMm && values.sizeHeightMm) ? `${values.sizeWidthMm}x${values.sizeHeightMm}` : ""}
-                      onChange={handleSizeChange}
-                      disabled={!values.machine || uniqueSizes.length === 0}
-                      className={cls(err("sizeWidthMm") || err("sizeHeightMm"))}
-                    >
-                      <option value="">{uniqueSizes.length === 0 ? "— No sizes for this machine —" : "Select Size"}</option>
-                      {uniqueSizes.map((size) => <option key={size} value={size}>{size.replace('x', ' × ')} mm</option>)}
-                    </select>
-                    {(err("sizeWidthMm") || err("sizeHeightMm")) && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">Size is required</p>}
-                  </div>
-
-                  {/* Thickness */}
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Thickness (mm) <span className="text-red-500">*</span></label>
-                    <select name="thicknessMm" value={values.thicknessMm} onChange={handleThicknessChange}
-                      disabled={!values.sizeWidthMm || !values.sizeHeightMm} className={cls(err("thicknessMm"))}>
-                      <option value="">{(!values.sizeWidthMm || !values.sizeHeightMm) ? "Select size first" : "Select Thickness"}</option>
-                      {uniqueThicknesses.map((t) => <option key={t} value={t}>{t} mm</option>)}
-                    </select>
-                    {err("thicknessMm") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("thicknessMm")}</p>}
-                  </div>
-
-                  {/* Standard Time — always auto-filled from Standard Time Master */}
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                      Standard Time of Grinding One Glass (min)
-                      <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-filled)</span>
-                    </label>
-                    <input
-                      type="text"
-                      readOnly
-                      value={values.standardTimePerPieceMin ? `${values.standardTimePerPieceMin} min` : "—"}
-                      className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default"
-                    />
-                    {err("standardTimePerPieceMin") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("standardTimePerPieceMin")}</p>}
-                    {(values.machine && values.sizeWidthMm && values.sizeHeightMm && values.thicknessMm && !values.standardTimePerPieceMin) && <p className="text-[10px] text-amber-600 mt-0.5 leading-tight">No standard time found for this combination.</p>}
-                  </div>
-
+              {/* ── Line 2: Date + Operator ── */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Date <span className="text-red-500">*</span></label>
+                  <DatePicker
+                    name="date"
+                    value={values.date}
+                    onChange={handleChange}
+                    hasError={!!err("date")}
+                    placeholder="Select date"
+                  />
+                  {err("date") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("date")}</p>}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Operator <span className="text-red-500">*</span></label>
+                  <select name="operator" value={values.operator} onChange={handleChange} className={cls(err("operator"))}>
+                    <option value="">Select Operator</option>
+                    {operators.map((op) => <option key={op._id} value={op._id}>{op.name}</option>)}
+                  </select>
+                  {err("operator") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("operator")}</p>}
                 </div>
               </div>
 
-              {/* ── Section 3: Output Quantities ── */}
-              <div>
-                <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Output Quantities</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+              {/* ── Line 3: Shift On/Off Time — auto-filled from the selected
+                  Machine's own Shift Time Start/End, but editable here in
+                  case this particular submission ran under a different
+                  schedule than the Machine's usual one. ── */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
+                    Shift On Time <span className="text-red-500">*</span>
+                    <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-filled from Machine, editable if needed)</span>
+                  </label>
+                  <TimePicker
+                    name="shiftOnTime"
+                    value={values.shiftOnTime}
+                    onChange={handleChange}
+                    hasError={!!err("shiftOnTime")}
+                    placeholder="--:--"
+                  />
+                  {err("shiftOnTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("shiftOnTime")}</p>}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
+                    Shift Off Time <span className="text-red-500">*</span>
+                    <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-filled from Machine, editable if needed)</span>
+                  </label>
+                  <TimePicker
+                    name="shiftOffTime"
+                    value={values.shiftOffTime}
+                    onChange={handleChange}
+                    hasError={!!err("shiftOffTime")}
+                    placeholder="--:--"
+                  />
+                  {err("shiftOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("shiftOffTime")}</p>}
+                </div>
+              </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                      Production Qty (Total Qty) <span className="text-red-500">*</span>
-                    </label>
-                    <input type="number" name="processQty" value={values.processQty} onChange={handleChange} onWheel={(e) => e.target.blur()} ref={noWheelChange}
-                      onInput={(e) => e.target.value = e.target.value.slice(0, 30)}
-                      min={1} step={1} className={cls(err("processQty"))} placeholder="Enter quantity" />
-                    {err("processQty") && !err("processQty").startsWith("Not achievable") && (
-                      <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("processQty")}</p>
+              {/* ── Repeatable entries: each pairs Machine Timing/Size/Qty with
+                  its own Downtime & Stoppage Reasons — one saved record per
+                  entry. Only one entry is expanded at a time. ── */}
+              {rows.map((row, idx) => {
+                const isOpen = openRowIndex === idx;
+                const thicknesses = getUniqueThicknesses(row);
+                const rowHasErrors = submitted && Object.keys(rowErrors[idx] || {}).length > 0;
+                const rErr = (name) => rowErr(idx, name);
+                return (
+                  <div key={idx} className="border-t border-slate-100 dark:border-slate-800 pt-2.5">
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setOpenRowIndex(isOpen ? -1 : idx)}
+                        className="flex-1 flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 uppercase tracking-wider text-left"
+                      >
+                        {isOpen ? <Minus className="w-3.5 h-3.5 shrink-0" /> : <Plus className="w-3.5 h-3.5 shrink-0" />}
+                        {rows.length > 1 ? `Entry ${idx + 1}` : "Machine Timing, Size & Quantities"}
+                        {rowHasErrors ? (
+                          <span className="text-red-500 normal-case tracking-normal font-medium">— please review</span>
+                        ) : (
+                          !isOpen && row.sizeWidthMm && row.sizeHeightMm && (
+                            <span className="text-slate-500 dark:text-slate-400 normal-case tracking-normal font-normal">
+                              — {row.sizeWidthMm}×{row.sizeHeightMm} mm{row.thicknessMm ? `, ${row.thicknessMm} mm` : ""}
+                            </span>
+                          )
+                        )}
+                      </button>
+                      {rows.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setDeleteRowIndex(idx)}
+                          title="Remove this entry"
+                          className="p-1 rounded hover:bg-red-50 dark:hover:bg-red-950/40 text-slate-400 hover:text-red-600 shrink-0"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {isOpen && (
+                      <div className="space-y-2 mt-2">
+
+                        {/* M/C Start/Off Time */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Start Time <span className="text-red-500">*</span></label>
+                            <TimePicker
+                              name="mcStartTime"
+                              value={row.mcStartTime}
+                              onChange={(e) => handleRowChange(idx, e)}
+                              hasError={!!rErr("mcStartTime")}
+                              placeholder="--:--"
+                            />
+                            {rErr("mcStartTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{rErr("mcStartTime")}</p>}
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Off Time <span className="text-red-500">*</span></label>
+                            <TimePicker
+                              name="mcOffTime"
+                              value={row.mcOffTime}
+                              onChange={(e) => handleRowChange(idx, e)}
+                              hasError={!!rErr("mcOffTime")}
+                              placeholder="--:--"
+                            />
+                            {rErr("mcOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{rErr("mcOffTime")}</p>}
+                          </div>
+                        </div>
+
+                        {/* Size & Thickness */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Size (mm) <span className="text-red-500">*</span></label>
+                            <select
+                              value={(row.sizeWidthMm && row.sizeHeightMm) ? `${row.sizeWidthMm}x${row.sizeHeightMm}` : ""}
+                              onChange={(e) => handleSizeChange(idx, e)}
+                              disabled={!values.machine || uniqueSizes.length === 0}
+                              className={cls(rErr("sizeWidthMm") || rErr("sizeHeightMm"))}
+                            >
+                              <option value="">{uniqueSizes.length === 0 ? "— No sizes for this machine —" : "Select Size"}</option>
+                              {uniqueSizes.map((size) => <option key={size} value={size}>{size.replace('x', ' × ')} mm</option>)}
+                            </select>
+                            {(rErr("sizeWidthMm") || rErr("sizeHeightMm")) && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">Size is required</p>}
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Thickness (mm) <span className="text-red-500">*</span></label>
+                            <select name="thicknessMm" value={row.thicknessMm} onChange={(e) => handleThicknessChange(idx, e)}
+                              disabled={!row.sizeWidthMm || !row.sizeHeightMm} className={cls(rErr("thicknessMm"))}>
+                              <option value="">{(!row.sizeWidthMm || !row.sizeHeightMm) ? "Select size first" : "Select Thickness"}</option>
+                              {thicknesses.map((t) => <option key={t} value={t}>{t} mm</option>)}
+                            </select>
+                            {rErr("thicknessMm") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{rErr("thicknessMm")}</p>}
+                          </div>
+                        </div>
+
+                        {/* Production / OK / Rejected Qty — compact 3-across row */}
+                        <div className="grid grid-cols-3 gap-x-2">
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
+                              Production Qty <span className="text-red-500">*</span>
+                            </label>
+                            <input type="number" name="processQty" value={row.processQty} onChange={(e) => handleRowChange(idx, e)} onWheel={(e) => e.target.blur()} ref={noWheelChange}
+                              onInput={(e) => e.target.value = e.target.value.slice(0, 30)}
+                              min={1} step={1} className={cls(rErr("processQty")) + " !px-2 !py-1.5 text-xs"} placeholder="Qty" />
+                            {rErr("processQty") && !rErr("processQty").startsWith("Not achievable") && (
+                              <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{rErr("processQty")}</p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
+                              OK Qty <span className="text-red-500">*</span>
+                            </label>
+                            <input type="number" name="okQty" value={row.okQty} onChange={(e) => handleRowChange(idx, e)} onWheel={(e) => e.target.blur()} ref={noWheelChange}
+                              onInput={(e) => e.target.value = e.target.value.slice(0, 30)}
+                              min={0} step={1} className={cls(rErr("okQty")) + " !px-2 !py-1.5 text-xs"} placeholder="Qty" />
+                            {rErr("okQty") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{rErr("okQty")}</p>}
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Rejected Qty</label>
+                            <input
+                              type="text"
+                              readOnly
+                              value={
+                                row.processQty !== "" && row.okQty !== ""
+                                  ? Math.max(0, Number(row.processQty) - Number(row.okQty))
+                                  : "—"
+                              }
+                              className="w-full border border-slate-200 bg-slate-50 rounded-lg px-2 py-1.5 text-xs text-slate-600 dark:text-slate-300 outline-none cursor-default"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Capacity ("Not achievable") error — rendered as a prominent full-width
+                            alert instead of the tiny inline field message, since missing this one
+                            is the difference between a save that silently fails and one that doesn't. */}
+                        {rErr("processQty") && rErr("processQty").startsWith("Not achievable") && (
+                          <div className="flex items-start gap-2 rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3.5 py-2.5">
+                            <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                            <p className="text-xs sm:text-sm font-semibold text-red-700 dark:text-red-300 leading-snug">{rErr("processQty")}</p>
+                          </div>
+                        )}
+
+                        {/* Downtime & Stoppage Reasons — paired 1:1 with this entry */}
+                        <div className="pt-1">
+                          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Downtime &amp; Stoppage Reasons</p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                            {STOPPAGE_FIELDS.map((f) => (
+                              <React.Fragment key={f.key}>
+                                <div>
+                                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">{f.label}</label>
+                                  <input type="number" name={f.key} value={row[f.key]} onChange={(e) => handleRowChange(idx, e)} onWheel={(e) => e.target.blur()} ref={noWheelChange}
+                                    min={0} max={1440} step={1} className={cls(rErr(f.key))} />
+                                  {rErr(f.key) && <p className="text-[10px] text-red-500 mt-0.5">{rErr(f.key)}</p>}
+                                </div>
+                                {f.key === "othersMin" && (
+                                  <div className="sm:col-span-2">
+                                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
+                                      Remarks {Number(row.othersMin) > 0 && <span className="text-red-500">*</span>}
+                                    </label>
+                                    <textarea
+                                      name="othersRemark"
+                                      value={row.othersRemark}
+                                      onChange={(e) => handleRowChange(idx, e)}
+                                      maxLength={300}
+                                      rows={2}
+                                      placeholder="Describe the reason for Others downtime"
+                                      className={cls(rErr("othersRemark")) + " resize-none"}
+                                    />
+                                    {rErr("othersRemark") && <p className="text-[10px] text-red-500 mt-0.5">{rErr("othersRemark")}</p>}
+                                  </div>
+                                )}
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        </div>
+
+                      </div>
                     )}
                   </div>
+                );
+              })}
 
-                  {/* Capacity ("Not achievable") error — rendered as a prominent full-width
-                      alert instead of the tiny inline field message, since missing this one
-                      is the difference between a save that silently fails and one that doesn't. */}
-                  {err("processQty") && err("processQty").startsWith("Not achievable") && (
-                    <div className="sm:col-span-2 flex items-start gap-2 rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3.5 py-2.5">
-                      <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
-                      <p className="text-xs sm:text-sm font-semibold text-red-700 dark:text-red-300 leading-snug">{err("processQty")}</p>
-                    </div>
-                  )}
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                      OK Grinding Glass Qty <span className="text-red-500">*</span>
-                    </label>
-                    <input type="number" name="okQty" value={values.okQty} onChange={handleChange} onWheel={(e) => e.target.blur()} ref={noWheelChange}
-                      onInput={(e) => e.target.value = e.target.value.slice(0, 30)}
-                      min={0} step={1} className={cls(err("okQty"))} placeholder="Enter quantity" />
-                    {err("okQty") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("okQty")}</p>}
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                      Rejected Qty
-                      <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-calculated: Production Qty − OK Qty)</span>
-                    </label>
-                    <input
-                      type="text"
-                      readOnly
-                      value={
-                        values.processQty !== "" && values.okQty !== ""
-                          ? Math.max(0, Number(values.processQty) - Number(values.okQty))
-                          : "—"
-                      }
-                      className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 outline-none cursor-default"
-                    />
-                  </div>
-
-                </div>
-              </div>
-
-              {/* ── Section 4: Stoppage Reasons ── */}
-              <div>
-                <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Downtime &amp; Stoppage Reasons</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
-                  {STOPPAGE_FIELDS.map((f) => (
-                    <React.Fragment key={f.key}>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">{f.label}</label>
-                        <input type="number" name={f.key} value={values[f.key]} onChange={handleChange} onWheel={(e) => e.target.blur()} ref={noWheelChange}
-                          min={0} max={1440} step={1} className={cls(err(f.key))} />
-                        {err(f.key) && <p className="text-[10px] text-red-500 mt-0.5">{err(f.key)}</p>}
-                      </div>
-                      {f.key === "othersMin" && (
-                        <div className="sm:col-span-2">
-                          <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                            Remarks {Number(values.othersMin) > 0 && <span className="text-red-500">*</span>}
-                          </label>
-                          <textarea
-                            name="othersRemark"
-                            value={values.othersRemark}
-                            onChange={handleChange}
-                            maxLength={300}
-                            rows={2}
-                            placeholder="Describe the reason for Others downtime"
-                            className={cls(err("othersRemark")) + " resize-none"}
-                          />
-                          {err("othersRemark") && <p className="text-[10px] text-red-500 mt-0.5">{err("othersRemark")}</p>}
-                        </div>
-                      )}
-                    </React.Fragment>
-                  ))}
-                </div>
-              </div>
+              {/* ── Add another Machine Timing + Downtime entry ── */}
+              <button
+                type="button"
+                onClick={addRow}
+                className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-brand-600 hover:border-brand-400 text-xs font-semibold py-2 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add Another Entry
+              </button>
 
               </div>
               {/* Footer */}
@@ -1658,7 +1998,7 @@ const GrindingEntry = () => {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                     </svg>Saving…</>
-                  ) : "Save Entry"}
+                  ) : (rows.length > 1 ? `Save ${rows.length} Entries` : "Save Entry")}
                 </button>
               </div>
             </form>
@@ -1668,6 +2008,9 @@ const GrindingEntry = () => {
 
       <DeleteModal show={!!deleteId} toggle={() => setDeleteId(null)}
         handleDelete={handleDelete} disabled={isDeleteLoading} />
+
+      <DeleteModal show={deleteRowIndex !== null} toggle={() => setDeleteRowIndex(null)}
+        handleDelete={() => { removeRow(deleteRowIndex); setDeleteRowIndex(null); }} disabled={false} />
 
       {showEfficiency && <EfficiencyModal onClose={() => setShowEfficiency(false)} />}
       {showShiftTimeReport && <ShiftTimeReportModal onClose={() => setShowShiftTimeReport(false)} />}

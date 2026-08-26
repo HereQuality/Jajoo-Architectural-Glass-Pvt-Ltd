@@ -156,6 +156,15 @@ const ProductionEntrySchema = new mongoose.Schema(
       earlyClosedMin:        { type: Number, default: 0 },
     },
 
+    // Links entries saved together from one "Add Entry" submission with
+    // multiple rows (Process/M-C Name/Date/Operator shared, each row its own
+    // timing/size/qty/downtime) — undefined for entries saved singly. Purely
+    // a display grouping key for the sheet; never used in calculations.
+    batchId: {
+      type: String,
+      index: true,
+    },
+
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       refPath: "createdByModel",
