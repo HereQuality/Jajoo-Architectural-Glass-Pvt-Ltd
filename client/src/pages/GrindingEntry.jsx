@@ -41,6 +41,18 @@ const STOPPAGE_FIELDS = [
 // .service.js's STOPPAGE_KEYS exactly.
 const TOTAL_STOPPAGE_FIELDS = STOPPAGE_FIELDS.filter((f) => f.key !== "plannedDowntimeMin");
 
+// ── Rejection reason fields ───────────────────────────────────────────────
+// Mirrors STOPPAGE_FIELDS' pattern exactly — Rejected Qty is never typed
+// directly, it's the sum of these (see server/models/ProductionEntry.js and
+// buildData() in the controller, which derive rejectedQty from these keys).
+const REJECTION_FIELDS = [
+  { key: "rejScratchesQty",        label: "Scratches" },
+  { key: "rejChippingQty",         label: "Chipping" },
+  { key: "rejCornerBreakageQty",   label: "Corner Breakage" },
+  { key: "rejSizeMismatchQty",     label: "Size Mis-match" },
+  { key: "rejHandlingBreakageQty", label: "Handling Breakage and Others" },
+];
+
 
 // ── Calculated (derived) columns shown in the sheet, in order ────────────
 // Each entry: key inside e.calculated, label, and the exact formula text
@@ -149,6 +161,7 @@ const buildRow = () => ({
   okQty: "",
   othersRemark: "",
   ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, "0"])),
+  ...Object.fromEntries(REJECTION_FIELDS.map((f) => [f.key, "0"])),
 });
 
 // ── Capacity check helper — mirrors server/services/productionCalculation
@@ -273,7 +286,7 @@ const validateRow = (row, shared) => {
   else if (!timeRx.test(row.mcStartTime)) e.mcStartTime = "Use HH:mm format";
   if (!row.mcOffTime) e.mcOffTime = "M/C Off Time is required";
   else if (!timeRx.test(row.mcOffTime)) e.mcOffTime = "Use HH:mm format";
-  else if (!e.mcStartTime && row.mcStartTime === row.mcOffTime) e.mcOffTime = "Off Time cannot equal Start Time";
+  else if (!e.mcStartTime && row.mcOffTime <= row.mcStartTime) e.mcOffTime = "M/C Off Time cannot be earlier than or equal to M/C Start Time";
 
   if (!row.sizeWidthMm) e.sizeWidthMm = "Width is required";
   if (!row.sizeHeightMm) e.sizeHeightMm = "Height is required";
@@ -293,6 +306,21 @@ const validateRow = (row, shared) => {
 
   if (!e.processQty && !e.okQty && oq > pq)
     e.okQty = "OK Qty cannot exceed Production Qty";
+
+  // Rejected Qty is never typed directly — it's the sum of the individual
+  // Rejection Reasons below (mirrors how Total Stoppage sums STOPPAGE_FIELDS).
+  for (const f of REJECTION_FIELDS) {
+    const val = row[f.key];
+    if (val === "" || val === null || val === undefined) continue;
+    const n = Number(val);
+    if (isNaN(n) || !Number.isInteger(n) || n < 0) e[f.key] = "Must be a whole number ≥ 0";
+    else if (String(val).length > 30) e[f.key] = "Cannot exceed 30 digits";
+  }
+  const rejectionFieldsClean = REJECTION_FIELDS.every((f) => !e[f.key]);
+  const rejectedQtyTotal = REJECTION_FIELDS.reduce((s, f) => s + (Number(row[f.key]) || 0), 0);
+
+  if (!e.processQty && !e.okQty && rejectionFieldsClean && oq + rejectedQtyTotal > pq)
+    e.rejectionTotal = `OK Qty + Rejected Qty (${rejectedQtyTotal}, from Rejection Reasons below) cannot exceed Production Qty`;
 
   for (const f of STOPPAGE_FIELDS) {
     const val = row[f.key];
@@ -654,9 +682,15 @@ const fmtDelayOrEarly = (startDelayMin, earlyClosedMin) => {
 // the same padding it always had).
 const StackedCell = ({ className, items }) => (
   <td className={className}>
-    <div className="flex flex-col">
+    {/* -mx-3 cancels the td's own px-3 padding so the divider border below
+        can bleed all the way out to the cell's actual left/right edges;
+        px-3 is then re-applied per item so the text still lines up under
+        the header exactly as before. No explicit width here — the box must
+        stay "auto" so the negative margins actually stretch it (a fixed
+        w-full would pin the width and just shift the box instead). */}
+    <div className="flex flex-col -mx-3">
       {items.map((node, i) => (
-        <div key={i} className={`py-2 ${i > 0 ? "border-t border-slate-200 dark:border-slate-700" : ""}`}>{node}</div>
+        <div key={i} className={`px-3 py-2 w-full ${i > 0 ? "border-t border-slate-400 dark:border-slate-500" : ""}`}>{node}</div>
       ))}
     </div>
   </td>
@@ -965,7 +999,8 @@ const GrindingEntry = () => {
         e.standardTimePerPieceMin,
         e.processQty,
         e.okQty,
-        Number(e.processQty) - Number(e.okQty), // Rejected Qty
+        e.rejectedQty,
+        ...REJECTION_FIELDS.map((f) => e[f.key]),
         c.workingScheduleMin,
         ...STOPPAGE_FIELDS.map((f) => e[f.key]),
         e.othersRemark, // Remark
@@ -1040,6 +1075,29 @@ const GrindingEntry = () => {
   const handleRowChange = (index, e) => {
     const { name, value } = e.target;
     updateRow(index, { [name]: value });
+  };
+
+  // Rejection Reasons share one budget: Production Qty − OK Qty. Each field
+  // is clamped to whatever's left of that budget after every OTHER reason
+  // field, so the running total can never exceed the difference — the user
+  // simply can't type past it instead of finding out only after Save.
+  const handleRejectionChange = (index, e) => {
+    const { name, value } = e.target;
+    updateRow(index, (row) => {
+      const clearWarn = { ...row, [name]: value, __rejCapWarn: { ...row.__rejCapWarn, [name]: false } };
+      if (value === "") return clearWarn;
+      const diff = Number(row.processQty) - Number(row.okQty);
+      if (!Number.isFinite(diff) || row.processQty === "" || row.okQty === "") return clearWarn;
+      const othersSum = REJECTION_FIELDS.reduce((s, f) => (f.key === name ? s : s + (Number(row[f.key]) || 0)), 0);
+      const maxAllowed = Math.max(0, diff - othersSum);
+      const typed = Math.max(0, Math.trunc(Number(value) || 0));
+      const clamped = Math.min(typed, maxAllowed);
+      return {
+        ...row,
+        [name]: String(clamped),
+        __rejCapWarn: { ...row.__rejCapWarn, [name]: typed > maxAllowed },
+      };
+    });
   };
 
   const handleSizeChange = (index, e) => {
@@ -1190,6 +1248,7 @@ const GrindingEntry = () => {
       okQty: e.okQty || "0",
       othersRemark: e.othersRemark || "",
       ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, String(e[f.key] || "0")])),
+      ...Object.fromEntries(REJECTION_FIELDS.map((f) => [f.key, String(e[f.key] || "0")])),
     }]);
     setRowErrors([{}]);
     setFormErrors({});
@@ -1292,7 +1351,7 @@ const GrindingEntry = () => {
       setBatchId(effectiveBatchId);
     }
     const buildPayload = (row) => {
-      const { __entryId, ...rowFields } = row;
+      const { __entryId, __rejCapWarn, ...rowFields } = row;
       return {
         date: values.date,
         machine: values.machine,
@@ -1483,6 +1542,13 @@ const GrindingEntry = () => {
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">OK Qty</th>
               <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Rejected Qty</th>
 
+              {/* Individual Rejection Reason fields (entered data) */}
+              {REJECTION_FIELDS.map((f) => (
+                <th key={f.key} className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">
+                  {f.label}
+                </th>
+              ))}
+
               {/* Working Schedule Time (calculated) */}
               <CalcHeader label="Working Schedule Time" formula={CALC_COLUMNS[0].formula} colKey={CALC_COLUMNS[0].key} openKey={openFormula?.key} onToggle={toggleFormula} sticky="sticky top-0" extraClass="border-b" />
 
@@ -1523,13 +1589,18 @@ const GrindingEntry = () => {
           </thead>
           <tbody>
             {filteredEntries.length === 0 && (
-              <tr><td colSpan={14 + STOPPAGE_FIELDS.length + 1 + 5 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
+              <tr><td colSpan={14 + STOPPAGE_FIELDS.length + REJECTION_FIELDS.length + 1 + 5 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
                 {loadingSheet ? "Loading…" : sheetSearch ? "No entries match your search." : "No entries for this machine yet."}
               </td></tr>
             )}
             {groupedEntries.map((group) => {
               const first = group[0];
               const mName = typeof first.machine === "object" ? first.machine?.machineName : machines.find(m => m._id === first.machine)?.machineName;
+              // Batched rows (more than one entry per submission) get a shaded
+              // background on every column after Operator, so the whole span
+              // of stacked values reads as one grouped strip at a glance.
+              const isMultiRow = group.length > 1;
+              const plainBg = isMultiRow ? "bg-slate-50 dark:bg-slate-800/60" : "bg-white dark:bg-[#1a1a1a]";
               return (
               <tr key={group.map((e) => e._id).join("-")} className="border-b border-slate-300 dark:border-slate-700 hover:bg-slate-50/60 transition-colors">
                 {/* Shared across the whole batch — Date/Machine/Operator/Shift are picked once per submission */}
@@ -1537,33 +1608,38 @@ const GrindingEntry = () => {
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-medium">{mName || "—"}</td>
                 <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{first.operator?.name || "—"}</td>
                 {/* M/C Start / M/C Off — one per entry in the batch */}
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs" items={group.map((e) => e.mcStartTime || "—")} />
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs" items={group.map((e) => e.mcOffTime || "—")} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs`} items={group.map((e) => e.mcStartTime || "—")} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs`} items={group.map((e) => e.mcOffTime || "—")} />
 
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{first.shiftOnTime || (typeof first.machine === "object" ? first.machine?.machineOnTime : null) || "—"}</td>
-                <td className="bg-white dark:bg-[#1a1a1a] px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400">{first.shiftOffTime || (typeof first.machine === "object" ? first.machine?.machineOffTime : null) || "—"}</td>
+                <td className={`${plainBg} px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400`}>{first.shiftOnTime || (typeof first.machine === "object" ? first.machine?.machineOnTime : null) || "—"}</td>
+                <td className={`${plainBg} px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400`}>{first.shiftOffTime || (typeof first.machine === "object" ? first.machine?.machineOffTime : null) || "—"}</td>
 
                 {/* Overtime / Start Delay / Early Closed */}
                 <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtMin((e.calculated || {}).overtimeMin))} />
                 <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtDelayOrEarly((e.calculated || {}).startDelayMin, (e.calculated || {}).earlyClosedMin))} />
 
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.sizeWidthMm}×${e.sizeHeightMm}`)} />
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.thicknessMm} mm`)} />
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => fmt(e.standardTimePerPieceMin, "min"))} />
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.processQty} qty`)} />
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => `${e.okQty} qty`)} />
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold" items={group.map((e) => `${Number(e.processQty) - Number(e.okQty)} qty`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.sizeWidthMm}×${e.sizeHeightMm}`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.thicknessMm} mm`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => fmt(e.standardTimePerPieceMin, "min"))} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.processQty} qty`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.okQty} qty`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold`} items={group.map((e) => `${e.rejectedQty} qty`)} />
+
+                {/* Individual Rejection Reason values */}
+                {REJECTION_FIELDS.map((f) => (
+                  <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e[f.key] || 0} qty`)} />
+                ))}
 
                 {/* Working Schedule Time */}
                 <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).workingScheduleMin, UNIT_BY_CALC_KEY.workingScheduleMin))} />
 
                 {/* Individual stoppage reason values */}
                 {STOPPAGE_FIELDS.map((f) => (
-                  <StackedCell key={f.key} className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200" items={group.map((e) => fmt(e[f.key], "min"))} />
+                  <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => fmt(e[f.key], "min"))} />
                 ))}
 
                 {/* Remark — hidden by default, "eye" opens a popover with the Others-downtime note */}
-                <StackedCell className="bg-white dark:bg-[#1a1a1a] px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-center" items={group.map((e) => (
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-center`} items={group.map((e) => (
                   <button
                     key={e._id}
                     type="button"
@@ -1756,40 +1832,11 @@ const GrindingEntry = () => {
                 </div>
               </div>
 
-              {/* ── Line 3: Shift On/Off Time — auto-filled from the selected
-                  Machine's own Shift Time Start/End, but editable here in
-                  case this particular submission ran under a different
-                  schedule than the Machine's usual one. ── */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                    Shift On Time <span className="text-red-500">*</span>
-                    <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-filled from Machine, editable if needed)</span>
-                  </label>
-                  <TimePicker
-                    name="shiftOnTime"
-                    value={values.shiftOnTime}
-                    onChange={handleChange}
-                    hasError={!!err("shiftOnTime")}
-                    placeholder="--:--"
-                  />
-                  {err("shiftOnTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("shiftOnTime")}</p>}
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                    Shift Off Time <span className="text-red-500">*</span>
-                    <span className="ml-1 text-[10px] text-slate-400 font-normal">(auto-filled from Machine, editable if needed)</span>
-                  </label>
-                  <TimePicker
-                    name="shiftOffTime"
-                    value={values.shiftOffTime}
-                    onChange={handleChange}
-                    hasError={!!err("shiftOffTime")}
-                    placeholder="--:--"
-                  />
-                  {err("shiftOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{err("shiftOffTime")}</p>}
-                </div>
-              </div>
+              {/* Shift On/Off Time is intentionally not shown here — it's
+                  auto-filled from the selected Machine's own Shift Time
+                  Start/End (see handleChange's "machine" branch) and still
+                  saved with every entry for the OEE snapshot; it's just not
+                  a visible/editable field in this form. ── */}
 
               {/* ── Repeatable entries: each pairs Machine Timing/Size/Qty with
                   its own Downtime & Stoppage Reasons — one saved record per
@@ -1799,13 +1846,16 @@ const GrindingEntry = () => {
                 const thicknesses = getUniqueThicknesses(row);
                 const rowHasErrors = submitted && Object.keys(rowErrors[idx] || {}).length > 0;
                 const rErr = (name) => rowErr(idx, name);
+                const rejectionDiff = Number(row.processQty) - Number(row.okQty);
+                const rejectionHasBudget = row.processQty !== "" && row.okQty !== "" && Number.isFinite(rejectionDiff);
+                const rejectionUsed = REJECTION_FIELDS.reduce((s, f) => s + (Number(row[f.key]) || 0), 0);
                 return (
                   <div key={idx} className="border-t border-slate-100 dark:border-slate-800 pt-2.5">
                     <div className="flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => setOpenRowIndex(isOpen ? -1 : idx)}
-                        className="flex-1 flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 uppercase tracking-wider text-left"
+                        className="flex-1 flex items-center gap-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white uppercase tracking-wider text-left"
                       >
                         {isOpen ? <Minus className="w-3.5 h-3.5 shrink-0" /> : <Plus className="w-3.5 h-3.5 shrink-0" />}
                         {rows.length > 1 ? `Entry ${idx + 1}` : "Machine Timing, Size & Quantities"}
@@ -1813,7 +1863,7 @@ const GrindingEntry = () => {
                           <span className="text-red-500 normal-case tracking-normal font-medium">— please review</span>
                         ) : (
                           !isOpen && row.sizeWidthMm && row.sizeHeightMm && (
-                            <span className="text-slate-500 dark:text-slate-400 normal-case tracking-normal font-normal">
+                            <span className="text-brand-600 dark:text-brand-400 normal-case tracking-normal font-semibold text-xs">
                               — {row.sizeWidthMm}×{row.sizeHeightMm} mm{row.thicknessMm ? `, ${row.thicknessMm} mm` : ""}
                             </span>
                           )
@@ -1855,6 +1905,7 @@ const GrindingEntry = () => {
                               onChange={(e) => handleRowChange(idx, e)}
                               hasError={!!rErr("mcOffTime")}
                               placeholder="--:--"
+                              minTime={row.mcStartTime || undefined}
                             />
                             {rErr("mcOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{rErr("mcOffTime")}</p>}
                           </div>
@@ -1915,11 +1966,7 @@ const GrindingEntry = () => {
                             <input
                               type="text"
                               readOnly
-                              value={
-                                row.processQty !== "" && row.okQty !== ""
-                                  ? Math.max(0, Number(row.processQty) - Number(row.okQty))
-                                  : "—"
-                              }
+                              value={REJECTION_FIELDS.reduce((s, f) => s + (Number(row[f.key]) || 0), 0)}
                               className="w-full border border-slate-200 bg-slate-50 rounded-lg px-2 py-1.5 text-xs text-slate-600 dark:text-slate-300 outline-none cursor-default"
                             />
                           </div>
@@ -1934,6 +1981,44 @@ const GrindingEntry = () => {
                             <p className="text-xs sm:text-sm font-semibold text-red-700 dark:text-red-300 leading-snug">{rErr("processQty")}</p>
                           </div>
                         )}
+
+                        {/* Rejection Reasons — paired 1:1 with this entry, sums into the
+                            read-only Rejected Qty above (mirrors Downtime & Stoppage Reasons) */}
+                        <div className="pt-1">
+                          <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+                            Rejection Reasons
+                            {rejectionHasBudget && (
+                              <span className="ml-1.5 normal-case tracking-normal font-normal text-slate-400">
+                                — {rejectionUsed} of {Math.max(0, rejectionDiff)} used
+                              </span>
+                            )}
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
+                            {REJECTION_FIELDS.map((f) => {
+                              const otherUsed = rejectionUsed - (Number(row[f.key]) || 0);
+                              const fieldMax = rejectionHasBudget ? Math.max(0, rejectionDiff - otherUsed) : undefined;
+                              const capHit = !!row.__rejCapWarn?.[f.key];
+                              return (
+                                <div key={f.key}>
+                                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">{f.label}</label>
+                                  <input type="number" name={f.key} value={row[f.key]} onChange={(e) => handleRejectionChange(idx, e)} onWheel={(e) => e.target.blur()} ref={noWheelChange}
+                                    onInput={(e) => e.target.value = e.target.value.slice(0, 30)}
+                                    min={0} max={fieldMax} step={1} className={cls(rErr(f.key) || capHit)} />
+                                  {rErr(f.key) && <p className="text-[10px] text-red-500 mt-0.5">{rErr(f.key)}</p>}
+                                  {!rErr(f.key) && capHit && (
+                                    <p className="text-[10px] text-red-500 mt-0.5">Limit reached — only {fieldMax} left of the Production − OK Qty difference</p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {rErr("rejectionTotal") && (
+                            <div className="flex items-start gap-2 rounded-xl border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 px-3.5 py-2.5 mt-2">
+                              <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                              <p className="text-xs sm:text-sm font-semibold text-red-700 dark:text-red-300 leading-snug">{rErr("rejectionTotal")}</p>
+                            </div>
+                          )}
+                        </div>
 
                         {/* Downtime & Stoppage Reasons — paired 1:1 with this entry */}
                         <div className="pt-1">

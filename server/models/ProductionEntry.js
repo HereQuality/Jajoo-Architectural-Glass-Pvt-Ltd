@@ -112,6 +112,16 @@ const ProductionEntrySchema = new mongoose.Schema(
       min: [0, "Rejected Qty cannot be negative"],
     },
 
+    // ── Rejection reason breakdown — rejectedQty above is never set
+    // directly by the client, it's derived server-side as the sum of these
+    // (see buildData() in the controller). Mirrors the Downtime & Stoppage
+    // Reasons fields' pattern below. ─────────────────────────────────────
+    rejScratchesQty:        { type: Number, default: 0, min: 0 },
+    rejChippingQty:         { type: Number, default: 0, min: 0 },
+    rejCornerBreakageQty:   { type: Number, default: 0, min: 0 },
+    rejSizeMismatchQty:     { type: Number, default: 0, min: 0 },
+    rejHandlingBreakageQty: { type: Number, default: 0, min: 0 }, // includes "Others"
+
     // ── Standard time (auto-fetched from StandardTime master) ────────────
     standardTimePerPieceMin: {
       type: Number,

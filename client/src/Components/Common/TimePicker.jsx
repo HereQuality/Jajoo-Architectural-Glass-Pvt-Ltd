@@ -17,6 +17,7 @@ const TimePicker = ({
   name,
   placeholder = "--:--",
   hasError = false,
+  minTime,
 }) => {
   const { isDarkMode } = useContext(ThemeContext);
 
@@ -42,6 +43,11 @@ const TimePicker = ({
   };
 
   const parsedValue = value ? dayjs(`2024-01-01T${value}`) : null;
+  // Anchored to the same fixed date as parsedValue — disables clock-dial
+  // hours/minutes before it so the user can't even pick an earlier time,
+  // e.g. M/C Off Time can't be set before M/C Start Time (a single entry
+  // only has one Date, so its Off Time can't roll into the next day).
+  const parsedMinTime = minTime ? dayjs(`2024-01-01T${minTime}`) : undefined;
 
   return (
     <div className="w-full bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 rounded-xl">
@@ -50,6 +56,7 @@ const TimePicker = ({
       <MuiTimePicker
         value={parsedValue}
         onChange={handleTimeChange}
+        minTime={parsedMinTime}
         minutesStep={5}
         viewRenderers={{
           hours: renderTimeViewClock,

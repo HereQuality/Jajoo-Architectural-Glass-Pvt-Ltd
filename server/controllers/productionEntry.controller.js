@@ -5,9 +5,18 @@ const { resolveMachineFilter } = require("../utils/entryQuery");
 const { aggregateEfficiencyByGroup } = require("../utils/efficiencyAggregate");
 const { buildGrindingEfficiencyPdf } = require("../services/report.service");
 
+// Rejected Qty is never accepted directly from the client — it's derived in
+// buildData() as the sum of these reason fields (mirrors how Total Stoppage
+// sums the Downtime & Stoppage Reason fields client-side).
+const REJECTION_QTY_FIELDS = [
+  "rejScratchesQty", "rejChippingQty", "rejCornerBreakageQty",
+  "rejSizeMismatchQty", "rejHandlingBreakageQty", // includes "Others"
+];
+
 const NUMERIC_FIELDS = [
   "sizeWidthMm", "sizeHeightMm",
   "processQty", "okQty",
+  ...REJECTION_QTY_FIELDS,
   "standardTimePerPieceMin",
   "plannedDowntimeMin",
   "noManpowerMin", "mechanicalBreakdownMin", "electricalBreakdownMin",
@@ -40,8 +49,8 @@ async function validatePayload(body) {
 
   if (!body.mcOffTime) errors.mcOffTime = "M/C Off Time is required";
   else if (!timeRx.test(body.mcOffTime)) errors.mcOffTime = "Must be HH:mm format";
-  else if (!errors.mcStartTime && body.mcStartTime === body.mcOffTime)
-    errors.mcOffTime = "Off Time cannot equal Start Time";
+  else if (!errors.mcStartTime && body.mcOffTime <= body.mcStartTime)
+    errors.mcOffTime = "M/C Off Time cannot be earlier than or equal to M/C Start Time";
 
   const dims = { sizeWidthMm: "Width", sizeHeightMm: "Height" };
   for (const [k, label] of Object.entries(dims)) {
@@ -64,6 +73,18 @@ async function validatePayload(body) {
   if (!errors.processQty && !errors.okQty) {
     if (Number(body.okQty) > Number(body.processQty))
       errors.okQty = "OK Qty cannot exceed Production Qty";
+  }
+
+  for (const k of REJECTION_QTY_FIELDS) {
+    if (body[k] === undefined || body[k] === "" || body[k] === null) continue;
+    const v = Number(body[k]);
+    if (isNaN(v) || !Number.isInteger(v) || v < 0) errors[k] = "Must be a whole number ≥ 0";
+  }
+  const rejectionFieldsClean = REJECTION_QTY_FIELDS.every((k) => !errors[k]);
+  if (!errors.processQty && !errors.okQty && rejectionFieldsClean) {
+    const rejectedQtyTotal = REJECTION_QTY_FIELDS.reduce((s, k) => s + (Number(body[k]) || 0), 0);
+    if (Number(body.okQty) + rejectedQtyTotal > Number(body.processQty))
+      errors.rejHandlingBreakageQty = "OK Qty + Rejected Qty (from Rejection Reasons) cannot exceed Production Qty";
   }
 
   const st = Number(body.standardTimePerPieceMin);
@@ -105,9 +126,7 @@ function buildData(body) {
   if (body.thicknessMm !== undefined && body.thicknessMm !== "") {
     data.thicknessMm = String(body.thicknessMm).trim();
   }
-  // Rejected Qty is never entered manually — always derived server-side so
-  // it can never drift from Production Qty / OK Qty (and is never missing).
-  data.rejectedQty = Math.max(0, Number(body.processQty) - Number(body.okQty));
+  data.rejectedQty = REJECTION_QTY_FIELDS.reduce((sum, k) => sum + (Number(body[k]) || 0), 0);
   return data;
 }
 
