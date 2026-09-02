@@ -40,7 +40,6 @@ const Login = lazyWithRetry(() => import("../pages/Login"));
 const Blocked = lazyWithRetry(() => import("../pages/Authentication/Blocked"));
 const NoAccess = lazyWithRetry(() => import("../pages/Authentication/NoAccess"));
 
-const HqeplAdmin = lazyWithRetry(() => import("../pages/HqeplAdmin"));
 const Home = lazyWithRetry(() => import("../pages/Home"));
 const Profile = lazyWithRetry(() => import("../pages/Profile"));
 const MenuGroup = lazyWithRetry(() => import("../pages/MenuGroup"));
@@ -61,7 +60,7 @@ const MachineMaster = lazyWithRetry(() => import("../pages/MachineMaster"));
 const ProcessMaster = lazyWithRetry(() => import("../pages/ProcessMaster"));
 const OperatorMaster = lazyWithRetry(() => import("../pages/OperatorMaster"));
 const StandardTimeMaster = lazyWithRetry(() => import("../pages/StandardTimeMaster"));
-const ShiftMaster = lazyWithRetry(() => import("../pages/ShiftMaster"));
+const HolidayMaster = lazyWithRetry(() => import("../pages/HolidayMaster"));
 const GrindingEntry = lazyWithRetry(() => import("../pages/GrindingEntry"));
 const Dashboard = lazyWithRetry(() => import("../pages/Dashboard"));
 
@@ -94,7 +93,6 @@ const protectedRoutes = [
   { path: "/home", component: <Home /> },
 
   // SuperAdmin only — defines the app's page/menu structure itself
-  { path: "/hqepl-dashboard", component: <HqeplAdmin />, roles: ["SuperAdmin"] },
   { path: "/menu-groups", component: <MenuGroup />, roles: ["SuperAdmin"] },
   { path: "/menus", component: <MenuMaster />, roles: ["SuperAdmin"] },
   { path: "/company", component: <CompanyManagement />, roles: ["SuperAdmin"] },
@@ -106,7 +104,7 @@ const protectedRoutes = [
   { path: "/employee-management/role", component: <RoleMaster /> },
   { path: "/employee-management/employee", component: <Employee /> },
   { path: "/employee-management/manage-role", component: <ManageRole /> },
-  { path: "/employee-management/team-members", component: <TeamMembers /> },
+  { path: "/employee-management/team-members", component: <TeamMembers />, roles: ["SuperAdmin"] },
   // Other Routes
   { path: "/skills", component: <Skills /> },
   { path: "/teams", component: <TeamsBoard /> },
@@ -118,7 +116,7 @@ const protectedRoutes = [
   { path: "/production/processes", component: <ProcessMaster /> },
   { path: "/production/operators", component: <OperatorMaster /> },
   { path: "/production/standard-time", component: <StandardTimeMaster /> },
-  { path: "/production/shift-master", component: <ShiftMaster /> },
+  { path: "/production/holidays", component: <HolidayMaster /> },
   { path: "/production/data-entry", component: <GrindingEntry /> },
   { path: "/dashboard", component: <Dashboard /> },
 

@@ -20,8 +20,6 @@ const mongoose = require("mongoose");
  * must keep calculating against the window they actually ran under, even
  * when later edited for an unrelated field (e.g. fixing OK Qty) — each
  * entry works off its own snapshot, independently of the others.
- * `shift` is a legacy field — no longer set by the entry form, kept only
- * so entries saved before this change retain their original Shift link.
  *
  * Optional stoppage / downtime fields (default 0, max 1440 min):
  *   plannedDowntimeMin, overtimeMin (auto-derived, see above),
@@ -42,15 +40,6 @@ const ProductionEntrySchema = new mongoose.Schema(
     operator: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Operator",
-    },
-    // No longer collected on the entry form — Shift On/Off Time for the
-    // Overtime/Working Schedule Time calculation now comes from the
-    // entry's own Machine (see applyShiftCalculations in
-    // productionEntry.controller.js). Kept optional, not removed, so
-    // historical entries saved before this change keep their Shift link.
-    shift: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Shift",
     },
     date: {
       type: Date,

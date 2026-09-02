@@ -17,29 +17,36 @@ const MenuGroupMaster = require("../models/MenuGroupMaster");
 const MenuMaster = require("../models/MenuMaster");
 
 // ── Sidebar order (top to bottom) ────────────────────────────────────────
-//   1. Home                      (link)
-//   2. hqepl-dashboard            (link, SuperAdmin only)
-//   3. Administration             (group: Menu Group, Menu Master, Company)
-//   4. Dashboard                  (link — the OEE analytics dashboard)
-//   5. Employee Management        (group)
-//   6. Setup                      (group: Process/Machine/Operator/Standard Time Master)
-//   7. Data Entry                 (group: Grinding Data Entry today; future
+//   1. Home                      (link — everyone lands here, SuperAdmin
+//                                  included; there's no separate SuperAdmin
+//                                  landing page anymore, see RETIRED_HQEPL_
+//                                  DASHBOARD_GROUP_NAME below)
+//   2. Administration             (group: Menu Group, Menu Master, Company)
+//   3. Dashboard                  (link — the OEE analytics dashboard)
+//   4. Employee Management        (group)
+//   5. Setup                      (group: Process/Machine/Operator/Standard
+//                                  Time/Holiday Master)
+//   6. Data Entry                 (group: Grinding Data Entry today; future
 //                                  per-process entry pages join here too)
-//   8. Support                    (link)
+//   7. Support                    (link)
 const HOME_GROUP = { menuGroupName: "Home", sequence: 1, isLink: true, menuUrl: "/hqepl/home", portal: "Both", icon: "Home" };
-const HQEPL_DASHBOARD_GROUP = { menuGroupName: "hqepl-dashboard", sequence: 2, isLink: true, menuUrl: "/hqepl/hqepl-dashboard", portal: "SuperAdmin", icon: "ShieldCheck" };
-const ADMINISTRATION_GROUP = { menuGroupName: "Administration", sequence: 3, isLink: false, portal: "SuperAdmin", icon: "Settings" };
-const DASHBOARD_GROUP = { menuGroupName: "Dashboard", sequence: 4, isLink: true, menuUrl: "/hqepl/dashboard", portal: "Both", icon: "LayoutDashboard" };
-const EMPLOYEE_MANAGEMENT_GROUP = { menuGroupName: "Employee Management", sequence: 5, isLink: false, portal: "Both", icon: "Users" };
-const SETUP_GROUP = { menuGroupName: "Setup", sequence: 6, isLink: false, portal: "Both", icon: "Wrench" };
-const DATA_ENTRY_GROUP = { menuGroupName: "Data Entry", sequence: 7, isLink: false, portal: "Both", icon: "ClipboardList" };
-const SUPPORT_GROUP = { menuGroupName: "Support", sequence: 8, isLink: true, menuUrl: "/hqepl/support", portal: "Both", icon: "Headphones" };
+const ADMINISTRATION_GROUP = { menuGroupName: "Administration", sequence: 2, isLink: false, portal: "SuperAdmin", icon: "Settings" };
+const DASHBOARD_GROUP = { menuGroupName: "Dashboard", sequence: 3, isLink: true, menuUrl: "/hqepl/dashboard", portal: "Both", icon: "LayoutDashboard" };
+const EMPLOYEE_MANAGEMENT_GROUP = { menuGroupName: "Employee Management", sequence: 4, isLink: false, portal: "Both", icon: "Users" };
+const SETUP_GROUP = { menuGroupName: "Setup", sequence: 5, isLink: false, portal: "Both", icon: "Wrench" };
+const DATA_ENTRY_GROUP = { menuGroupName: "Data Entry", sequence: 6, isLink: false, portal: "Both", icon: "ClipboardList" };
+const SUPPORT_GROUP = { menuGroupName: "Support", sequence: 7, isLink: true, menuUrl: "/hqepl/support", portal: "Both", icon: "Headphones" };
 
-// Retired group — its menus have all moved to SETUP_GROUP / DATA_ENTRY_GROUP.
-// Deactivated (not deleted) so any pre-existing group-level permission row
-// pointing at its _id doesn't dangle on a missing document; it just stops
-// rendering (getMenuByGroups filters isActive: true).
+// Retired groups/menus — deactivated (not deleted) so any pre-existing
+// group/menu-level permission row pointing at its _id doesn't dangle on a
+// missing document; it just stops rendering (getMenuByGroups filters
+// isActive: true).
 const RETIRED_PRODUCTION_GROUP_NAME = "Production";
+// hqepl-dashboard was a SuperAdmin-only landing page that duplicated what
+// Home already does for everyone — retired, not replaced.
+const RETIRED_HQEPL_DASHBOARD_GROUP_NAME = "hqepl-dashboard";
+// Shift Master (a standalone shift list) — retired outright, no replacement.
+const RETIRED_SHIFT_MASTER_MENU_URL = "/hqepl/production/shift-master";
 
 const ADMINISTRATION_MENUS = [
   { menuName: "Menu Group", menuUrl: "/x/menu-groups", sequence: 1, icon: "FolderTree" },
@@ -61,7 +68,7 @@ const SETUP_MENUS = [
   { menuName: "Machine Master", menuUrl: "/hqepl/production/machines", sequence: 2, icon: "Factory" },
   { menuName: "Operator Master", menuUrl: "/hqepl/production/operators", sequence: 3, icon: "UserCog" },
   { menuName: "Standard Time Master", menuUrl: "/hqepl/production/standard-time", sequence: 4, icon: "Timer" },
-  { menuName: "Shift Master", menuUrl: "/hqepl/production/shift-master", sequence: 5, icon: "Clock" },
+  { menuName: "Holiday Master", menuUrl: "/hqepl/production/holidays", sequence: 5, icon: "CalendarOff" },
 ];
 
 const DATA_ENTRY_MENUS = [
@@ -99,7 +106,6 @@ async function run() {
   await connectDB();
 
   await upsertGroup(HOME_GROUP);
-  await upsertGroup(HQEPL_DASHBOARD_GROUP);
 
   const adminGroup = await upsertGroup(ADMINISTRATION_GROUP);
   await upsertMenus(ADMINISTRATION_MENUS, adminGroup);
@@ -121,6 +127,17 @@ async function run() {
   // been re-pointed to Setup/Data Entry above.
   await MenuGroupMaster.updateMany(
     { menuGroupName: RETIRED_PRODUCTION_GROUP_NAME },
+    { isActive: false }
+  );
+
+  // Retire hqepl-dashboard (superseded by Home) and Shift Master (removed
+  // outright) — same deactivate-don't-delete reasoning as Production above.
+  await MenuGroupMaster.updateMany(
+    { menuGroupName: RETIRED_HQEPL_DASHBOARD_GROUP_NAME },
+    { isActive: false }
+  );
+  await MenuMaster.updateMany(
+    { menuUrl: RETIRED_SHIFT_MASTER_MENU_URL },
     { isActive: false }
   );
 

@@ -185,7 +185,7 @@ export default function Layout({ children }) {
           }}
           className={`h-16 flex items-center ${sidebarCollapsed ? 'md:justify-center md:px-2 px-6 justify-between' : 'px-6 justify-between'}`}
         >
-          <Link to={adminData?.roleType === "SuperAdmin" ? `/hqepl/hqepl-dashboard` : `/${roleSlug}/home`} className="flex items-center justify-center w-full min-w-0">
+          <Link to={adminData?.roleType === "SuperAdmin" ? `/hqepl/home` : `/${roleSlug}/home`} className="flex items-center justify-center w-full min-w-0">
             {logo ? (
               <img src={logo} alt={APP_NAME} className="h-12 w-auto shrink-0" />
             ) : (

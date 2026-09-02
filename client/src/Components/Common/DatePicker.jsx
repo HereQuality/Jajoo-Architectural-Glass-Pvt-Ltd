@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 
 const DAYS_SHORT  = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
@@ -6,6 +7,9 @@ const MONTHS_FULL = [
   "January","February","March","April","May","June",
   "July","August","September","October","November","December",
 ];
+
+const POPUP_WIDTH = 256; // w-64
+const POPUP_HEIGHT_EST = 340;
 
 /**
  * Custom DatePicker
@@ -16,6 +20,14 @@ const MONTHS_FULL = [
  *   name        – field name (forwarded in synthetic event)
  *   placeholder – string shown when no date selected
  *   hasError    – boolean → red border
+ *
+ * The calendar popup is rendered through a portal into document.body,
+ * positioned with `position: fixed` from the trigger's own bounding rect —
+ * NOT as a normal in-flow descendant. A plain absolutely-positioned popup
+ * gets clipped by the nearest scrollable ancestor (e.g. the Add Entry
+ * modal's `overflow-y-auto` body) regardless of z-index, which is exactly
+ * what was cutting the calendar off mid-selection. Escaping to body sidesteps
+ * that clipping entirely, wherever this component is used.
  */
 const DatePicker = ({
   value,
@@ -26,7 +38,9 @@ const DatePicker = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState(null); // { year, month }
+  const [coords, setCoords] = useState(null); // { top, left }
   const containerRef = useRef(null);
+  const popupRef = useRef(null);
 
   // Parse "YYYY-MM-DD" safely (avoids timezone shifts)
   const toLocalDate = (iso) => {
@@ -38,19 +52,51 @@ const DatePicker = ({
   const selected = toLocalDate(value);
   const today = new Date();
 
-  // Init view when popover opens
+  const computeCoords = () => {
+    if (!containerRef.current) return null;
+    const rect = containerRef.current.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const openAbove = spaceBelow < POPUP_HEIGHT_EST && rect.top > spaceBelow;
+    const left = Math.min(Math.max(8, rect.left), window.innerWidth - POPUP_WIDTH - 8);
+    const top = openAbove ? rect.top - POPUP_HEIGHT_EST - 4 : rect.bottom + 4;
+    return { top, left };
+  };
+
+  // Init view + position when popover opens
   useEffect(() => {
     if (open) {
       const base = selected || today;
       setView({ year: base.getFullYear(), month: base.getMonth() });
+      setCoords(computeCoords());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Close on outside click
+  // Keep the popup pinned to the trigger while the page scrolls/resizes —
+  // it's no longer a DOM descendant of any scrolling container, so it
+  // won't move on its own.
+  useEffect(() => {
+    if (!open) return;
+    const reposition = () => setCoords(computeCoords());
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Close on outside click — the popup now lives in a portal, so both the
+  // trigger AND the portal content have to be checked.
   useEffect(() => {
     const handler = (e) => {
-      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+      if (
+        containerRef.current && !containerRef.current.contains(e.target) &&
+        popupRef.current && !popupRef.current.contains(e.target)
+      ) {
+        setOpen(false);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -106,9 +152,14 @@ const DatePicker = ({
         </span>
       </button>
 
-      {/* Calendar popup */}
-      {open && view && (
-        <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-slate-200 rounded-2xl shadow-2xl p-3 w-64 select-none">
+      {/* Calendar popup — portaled to <body> so it escapes any ancestor's
+          overflow clipping (e.g. a modal's scrollable body). */}
+      {open && view && coords && createPortal(
+        <div
+          ref={popupRef}
+          style={{ position: "fixed", top: coords.top, left: coords.left, zIndex: 9999 }}
+          className="bg-white border border-slate-200 rounded-2xl shadow-2xl p-3 w-64 select-none"
+        >
           {/* Month navigation */}
           <div className="flex items-center justify-between mb-2">
             <button type="button" onClick={prevMonth}
@@ -160,7 +211,8 @@ const DatePicker = ({
               Today
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import ReactDOM from "react-dom";
 import Select, { components as selectComponents } from "react-select";
-import { Plus, Minus, X, Factory, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock } from "lucide-react";
+import { Plus, Minus, X, Factory, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock, ChevronRight, ChevronDown } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
@@ -9,6 +9,7 @@ import { useMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import { useOperators } from "../hooks/useOperators";
 import { useDebounce } from "../hooks/useDebounce";
+import { useCompanyHolidays } from "../hooks/useCompanyHolidays";
 import { listStandardTimes } from "../api/standardTime.api";
 import {
   createProductionEntry, listProductionEntries, updateProductionEntry, deleteProductionEntry,
@@ -17,7 +18,7 @@ import {
 import DatePicker from "../Components/Common/DatePicker";
 import TimePicker from "../Components/Common/TimePicker";
 import DeleteModal from "../Components/Common/DeleteModal";
-import { isEntryEditable, parseLocalDate } from "../utils/workingDays";
+import { isEntryEditable, parseLocalDate, buildHolidaySet } from "../utils/workingDays";
 
 // ── Stoppage fields ───────────────────────────────────────────────────────
 const PAGE_SIZE = 20;
@@ -34,12 +35,6 @@ const STOPPAGE_FIELDS = [
   { key: "noPowerMin",                 label: "No Power (Minutes)" },
   { key: "othersMin",                  label: "Others (Minutes)" },
 ];
-
-// Fields that feed the Total Stoppage sum — Planned Downtime is still an
-// entered/stored field (STOPPAGE_FIELDS above), it just doesn't count
-// toward Total Stoppage. Mirrors server/services/productionCalculation
-// .service.js's STOPPAGE_KEYS exactly.
-const TOTAL_STOPPAGE_FIELDS = STOPPAGE_FIELDS.filter((f) => f.key !== "plannedDowntimeMin");
 
 // ── Rejection reason fields ───────────────────────────────────────────────
 // Mirrors STOPPAGE_FIELDS' pattern exactly — Rejected Qty is never typed
@@ -62,62 +57,62 @@ const CALC_COLUMNS = [
     key: "workingScheduleMin",
     label: "Working Schedule Time",
     unit: "min",
-    formula: "Working Schedule Time = span from the earlier of Shift On Time/M/C Start Time to the later of Shift Off Time/M/C Off Time",
+    formula: "Working Schedule Time = span from the earlier of Shift On Time/Overall M/C Start Time to the later of Shift Off Time/Overall M/C Off Time — one value per batch (shared across every entry in the same submission), using the earliest M/C Start and latest M/C Off across the whole batch",
   },
   {
     key: "totalStoppageMin",
     label: "Total Stoppage",
     unit: "min",
     formula:
-      "Total Stoppage = No Manpower + Mechanical Breakdown + Electrical Breakdown + Raw Material Not Available + Stoppage (Human Error) + Changeover + Raw Material Problem + No Power + Others (Planned Downtime is entered separately and not included here)",
+      "Total Stoppage = No Manpower + Mechanical Breakdown + Electrical Breakdown + Raw Material Not Available + Stoppage (Human Error) + Changeover + Raw Material Problem + No Power + Others, summed across every entry in the batch (Planned Downtime is entered separately and not included here)",
   },
   {
     key: "availableWorkingMin",
     label: "Available Working Time",
     unit: "min",
-    formula: "Available Working Time = Working Schedule Time − Total Stoppage (NA if Total Stoppage ≥ Working Schedule Time)",
+    formula: "Available Working Time = Working Schedule Time − Total Stoppage (NA if Total Stoppage ≥ Working Schedule Time) — one value per batch",
   },
   {
     key: "idealProductionQty",
     label: "Ideal Production",
     unit: "qty",
-    formula: "Ideal Production = Available Working Time ÷ Standard Time per Glass (NA if Available Working Time is NA)",
+    formula: "Ideal Production = this row's own (M/C Off − M/C Start) ÷ its own Standard Time per Glass — per-row, not shared across a batch",
   },
   {
     key: "effectiveMcRunTimeMin",
     label: "Effective M/C Run Time",
     unit: "min",
-    formula: "Effective M/C Run Time = Production Qty (Total Qty) × Standard Time per Glass",
+    formula: "Effective M/C Run Time = sum, across every entry in the batch, of that entry's own actual M/C Off − M/C Start (the real time the machine was running) — one value per batch",
   },
   {
     key: "unreportedTimeMin",
     label: "Unreported Time",
     unit: "min",
-    formula: "Unreported Time = Available Working Time − Effective M/C Run Time (NA if Available Working Time is NA)",
+    formula: "Unreported Time = Available Working Time − Effective M/C Run Time (NA if Available Working Time is NA) — one value per batch",
   },
   {
     key: "availabilityRatio",
     label: "Availability Ratio",
     unit: "",
-    formula: "Availability Ratio = Available Working Time ÷ Working Schedule Time (NA if Available Working Time is NA)",
+    formula: "Availability Ratio = Effective M/C Run Time ÷ Available Working Time (NA if Available Working Time is NA) — one value per batch",
   },
   {
     key: "performanceRatio",
     label: "Performance Ratio",
     unit: "",
-    formula: "Performance Ratio = Production Qty (Total Qty) ÷ Ideal Production (NA if Ideal Production is NA)",
+    formula: "Performance Ratio = (Σ Production Qty × Standard Time, across the batch) ÷ Effective M/C Run Time (NA if Available Working Time is NA) — one value per batch",
   },
   {
     key: "qualityRatio",
     label: "Quality Ratio",
     unit: "",
-    formula: "Quality Ratio = OK Qty ÷ Production Qty",
+    formula: "Quality Ratio = Σ OK Qty ÷ Σ Production Qty, across the batch — one value per batch",
   },
 ];
 
-const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if Available Working Time is NA)";
-const OVERTIME_FORMULA = "Overtime = max(0, Shift On − M/C Start) + max(0, M/C Off − Shift Off) — minutes the machine ran outside its scheduled Shift window";
-const DELAY_EARLY_FORMULA = "Start Delay = max(0, M/C Start − Shift On)  ·  Early Closed = max(0, Shift Off − M/C Off) — computed independently, so both can be non-zero on the same entry (e.g. machine starts late AND finishes early)";
+const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if Available Working Time is NA) — one value per batch, shared across every entry saved together";
+const OVERTIME_FORMULA = "Overtime = max(0, Shift On − Overall M/C Start) + max(0, Overall M/C Off − Shift Off) — minutes the batch ran outside its scheduled Shift window, using the earliest M/C Start and latest M/C Off across the whole batch";
+const DELAY_EARLY_FORMULA = "Start Delay = max(0, Overall M/C Start − Shift On)  ·  Early Closed = max(0, Shift Off − Overall M/C Off) — computed independently, so both can be non-zero on the same batch (e.g. it starts late AND finishes early)";
 
 // Remembers the last Process picked in the Add Entry modal (across entries
 // and page reloads) so operators entering a run of rows for the same
@@ -182,14 +177,6 @@ const timeToMinutes = (hhmm) => {
   return h * 60 + m;
 };
 
-// Shortest signed distance (minutes) from `from` (HH:mm) to `to` (HH:mm) —
-// mirrors server/services/productionCalculation.service.js's signedDiffMin.
-const signedDiffMin = (from, to) => {
-  let diff = (timeToMinutes(to) - timeToMinutes(from) + 1440) % 1440;
-  if (diff > 720) diff -= 1440;
-  return diff;
-};
-
 // True if two [start, off) M/C time windows for the same Machine/Date
 // overlap — each window is normalized to extend past midnight when off <=
 // start (a shift crossing into the next day), so the same machine can't be
@@ -205,53 +192,18 @@ const timeWindowsOverlap = (aStart, aOff, bStart, bOff) => {
   return aS < bE && bS < aE;
 };
 
-// Overtime / Start Delay / Early Closed, derived from the selected Shift's
-// On/Off Time vs. the entered M/C Start/Off Time — mirrors
-// server/services/productionCalculation.service.js's deriveShiftDelta
-// exactly, so the client-side preview never disagrees with what gets saved.
-// Informational only — does NOT feed into Working Schedule Time below.
-const deriveShiftDelta = (shiftOnTime, shiftOffTime, mcStartTime, mcOffTime) => {
-  if (!shiftOnTime || !shiftOffTime) return { overtimeMin: 0, startDelayMin: 0, earlyClosedMin: 0 };
-  const startDeltaMin = signedDiffMin(shiftOnTime, mcStartTime);
-  const offDeltaMin = signedDiffMin(shiftOffTime, mcOffTime);
-  const startDelayMin = Math.max(0, startDeltaMin);
-  const earlyStartMin = Math.max(0, -startDeltaMin);
-  const lateFinishMin = Math.max(0, offDeltaMin);
-  const earlyClosedMin = Math.max(0, -offDeltaMin);
-  return { overtimeMin: earlyStartMin + lateFinishMin, startDelayMin, earlyClosedMin };
-};
-
-// Working Schedule Time = span from the earlier of Shift On/M-C Start Time
-// to the later of Shift Off/M-C Off Time — a direct min/max condition,
-// mirrors server/services/productionCalculation.service.js's
-// workingScheduleEnvelopeMin exactly (computed independently of Overtime).
-const computeWorkingScheduleMin = (shiftOnTime, shiftOffTime, mcStartTime, mcOffTime) => {
-  if (!shiftOnTime || !shiftOffTime) {
-    let d = timeToMinutes(mcOffTime) - timeToMinutes(mcStartTime);
-    if (d <= 0) d += 24 * 60;
-    return d;
-  }
-  let shiftOwnDurationMin = timeToMinutes(shiftOffTime) - timeToMinutes(shiftOnTime);
-  if (shiftOwnDurationMin <= 0) shiftOwnDurationMin += 24 * 60;
-  const startDeltaMin = signedDiffMin(shiftOnTime, mcStartTime);
-  const offDeltaMin = signedDiffMin(shiftOffTime, mcOffTime);
-  const effectiveStartOffsetMin = Math.min(0, startDeltaMin);
-  const effectiveEndOffsetMin = Math.max(0, offDeltaMin);
-  return Math.max(shiftOwnDurationMin - effectiveStartOffsetMin + effectiveEndOffsetMin, 0);
-};
-
-// Returns null (NA) when total stoppage consumes the whole working schedule
-// — mirrors server/services/productionCalculation.service.js exactly,
-// including excluding Planned Downtime from the Total Stoppage sum (see
-// TOTAL_STOPPAGE_FIELDS above).
+// Ideal Production Qty is a PER-ROW capacity check, independent of Shift
+// On/Off Time and stoppage minutes — mirrors server/services/
+// productionCalculation.service.js's computeRowIdealProductionQty exactly:
+// this row's own actual M/C run time (M/C Off − M/C Start) ÷ its own
+// Standard Time per Glass. "Given how long this size actually ran, how many
+// pieces should it have made at standard speed."
 const computeIdealProductionQty = (v) => {
-  const num = (x) => Number(x) || 0;
-  const totalStoppageMin = TOTAL_STOPPAGE_FIELDS.reduce((s, f) => s + num(v[f.key]), 0);
-  const workingScheduleMin = computeWorkingScheduleMin(v.shiftOnTime, v.shiftOffTime, v.mcStartTime, v.mcOffTime);
-  if (totalStoppageMin >= workingScheduleMin) return null;
-  const availableWorkingMin = workingScheduleMin - totalStoppageMin;
-  const std = num(v.standardTimePerPieceMin);
-  return std > 0 ? availableWorkingMin / std : 0;
+  const std = Number(v.standardTimePerPieceMin) || 0;
+  if (std <= 0) return 0;
+  let runMin = timeToMinutes(v.mcOffTime) - timeToMinutes(v.mcStartTime);
+  if (runMin <= 0) runMin += 24 * 60;
+  return runMin / std;
 };
 
 // ── Client-side validation ────────────────────────────────────────────────
@@ -333,21 +285,16 @@ const validateRow = (row, shared) => {
   if (Number(row.othersMin) > 0 && !othersRemark) e.othersRemark = "Remark is required when Others is greater than 0";
   else if (othersRemark.length > 300) e.othersRemark = "Cannot exceed 300 characters";
 
-  // Capacity check: can't process more pieces than the Available Working
-  // Time actually allows at this Standard Time. Only run once every input
-  // that feeds it is itself already valid, so this doesn't pile on top of
-  // more basic errors above.
-  const stoppageFieldsClean = STOPPAGE_FIELDS.every((f) => !e[f.key]);
-  if (!e.mcStartTime && !e.mcOffTime && !e.standardTimePerPieceMin && !e.processQty && stoppageFieldsClean) {
-    const idealProductionQty = computeIdealProductionQty({ ...row, shiftOnTime: shared.shiftOnTime, shiftOffTime: shared.shiftOffTime });
-    if (idealProductionQty === null) {
+  // Capacity check: can't process more pieces than this row's own actual
+  // M/C run time (M/C Off − M/C Start) allows at this Standard Time. Only
+  // run once every input that feeds it is itself already valid, so this
+  // doesn't pile on top of more basic errors above.
+  if (!e.mcStartTime && !e.mcOffTime && !e.standardTimePerPieceMin && !e.processQty) {
+    const idealProductionQty = computeIdealProductionQty(row);
+    if (idealProductionQty < pq) {
       e.processQty =
-        `Not achievable: Available Working Time is NA — Planned Downtime + total Stoppage consumes the entire ` +
-        `Working Schedule Time, so there is no time left to grind any glass. Reduce downtime/stoppage minutes.`;
-    } else if (idealProductionQty < pq) {
-      e.processQty =
-        `Not achievable: Available Working Time ÷ Standard Time = ${idealProductionQty.toFixed(2)} pcs, ` +
-        `which is less than Production Qty (${pq}). Reduce Production Qty or free up more Available Working Time.`;
+        `Not achievable: M/C run time ÷ Standard Time = ${idealProductionQty.toFixed(2)} pcs, ` +
+        `which is less than Production Qty (${pq}). Reduce Production Qty or check the M/C Start/Off Time.`;
     }
   }
 
@@ -674,6 +621,26 @@ const fmtDelayOrEarly = (startDelayMin, earlyClosedMin) => {
   return parts.length > 0 ? parts.join(" / ") : "—";
 };
 
+const sumBy = (arr, getter) => arr.reduce((s, e) => s + (Number(getter(e)) || 0), 0);
+
+// Appends one more stacked line labeled "Total" — the sum across every
+// entry in a multi-entry batch — onto a StackedCell's items. A lone entry
+// isn't given one: its own value already IS the total. `stacked: true`
+// renders the label above the value on two short lines instead of one
+// "Total: X" line — needed for the fixed-width OEE % column, which is too
+// narrow for that on one line without overflowing.
+const withTotal = (items, totalContent, { stacked = false } = {}) => {
+  if (items.length <= 1) return items;
+  const totalNode = stacked ? (
+    <span className="font-semibold text-[10px] leading-tight flex flex-col items-center whitespace-normal">
+      <span>Total</span><span>{totalContent}</span>
+    </span>
+  ) : (
+    <span className="font-semibold">Total: {totalContent}</span>
+  );
+  return [...items, totalNode];
+};
+
 // A sheet cell for a per-entry column, stacking one line per entry in a
 // batch (see `batchId` on the model) — a single-entry "batch" renders
 // identically to the old plain cell (one line, no divider). `className`
@@ -764,22 +731,21 @@ const ShiftTimeReportModal = ({ onClose }) => {
               <table className="w-full text-xs sm:text-sm border-separate border-spacing-0">
                 <thead>
                   <tr className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-left">
-                    {["Machine", "Shift", "Shift Start", "Shift End", "Shift Start Time", "Shift End Time", "Total Shift Time", "Overtime", "Start Delay / Early Closed"].map((h, i, arr) => (
+                    {["Machine", "Shift Start", "Shift End", "Shift Start Time", "Shift End Time", "Total Shift Time", "Overtime", "Start Delay / Early Closed"].map((h, i, arr) => (
                       <th key={h} className={`sticky top-0 z-10 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-b border-slate-300 dark:border-slate-700 ${i < arr.length - 1 ? "border-r" : ""}`}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {loading && (
-                    <tr><td colSpan={9} className="px-4 py-8 text-center text-slate-500 font-medium">Loading…</td></tr>
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-medium">Loading…</td></tr>
                   )}
                   {!loading && rows.length === 0 && (
-                    <tr><td colSpan={9} className="px-4 py-8 text-center text-slate-500 font-medium">No entries match this filter.</td></tr>
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-slate-500 font-medium">No entries match this filter.</td></tr>
                   )}
                   {!loading && rows.map((r, i) => (
                     <tr key={r._id} className={`border-b border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors ${i % 2 === 1 ? "bg-slate-50/70 dark:bg-slate-800/20" : "bg-white dark:bg-transparent"}`}>
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100 font-medium">{r.machineName}</td>
-                      <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200">{r.shiftName}</td>
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.shiftOnTime || "—"}</td>
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs">{r.shiftOffTime || "—"}</td>
                       <td className="px-3 py-2 whitespace-nowrap border-r border-slate-300 dark:border-slate-700 font-mono text-xs bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium">{r.effectiveStartTime || "—"}</td>
@@ -807,6 +773,10 @@ const GrindingEntry = () => {
   const { data: machines = [] } = useMachines();
   const { data: processes = [] } = useProcesses();
   const { data: operators = [] } = useOperators();
+  const { data: companyHolidays = [] } = useCompanyHolidays();
+  // Built once per holiday-list change, not per row — isEntryEditable's
+  // caller below runs inside a .map() over every visible entry.
+  const holidaySet = useMemo(() => buildHolidaySet(companyHolidays), [companyHolidays]);
 
   const [activeMachine, setActiveMachine] = useState("");
   const [sheetSearch, setSheetSearch] = useState("");
@@ -837,6 +807,10 @@ const GrindingEntry = () => {
   const [batchId, setBatchId] = useState(null);
   const [originalBatchId, setOriginalBatchId] = useState(null);
   const [openFormula, setOpenFormula] = useState(null); // { key, label, formula, rect } | null
+  // Collapsed by default — the 10 individual Downtime & Stoppage Reason
+  // columns make the sheet very wide; collapsing them to one toggle column
+  // is purely a display choice, the underlying data is unaffected.
+  const [showStoppageDetails, setShowStoppageDetails] = useState(false);
   const [openRemark, setOpenRemark] = useState(null); // { id, text, rect } | null
   const [showEfficiency, setShowEfficiency] = useState(false);
   const [showShiftTimeReport, setShowShiftTimeReport] = useState(false);
@@ -1552,8 +1526,21 @@ const GrindingEntry = () => {
               {/* Working Schedule Time (calculated) */}
               <CalcHeader label="Working Schedule Time" formula={CALC_COLUMNS[0].formula} colKey={CALC_COLUMNS[0].key} openKey={openFormula?.key} onToggle={toggleFormula} sticky="sticky top-0" extraClass="border-b" />
 
-              {/* Individual Downtime & Stoppage Reason fields (entered data) */}
-              {STOPPAGE_FIELDS.map((f) => (
+              {/* Downtime & Stoppage Reasons — collapsed to one toggle column
+                  by default (10 individual columns made the sheet very wide);
+                  click to expand/collapse the individual reason columns. */}
+              <th className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setShowStoppageDetails((v) => !v)}
+                  className="flex items-center gap-1 hover:text-brand-600 dark:hover:text-brand-400"
+                  title={showStoppageDetails ? "Collapse Downtime & Stoppage Reasons" : "Expand Downtime & Stoppage Reasons"}
+                >
+                  {showStoppageDetails ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
+                  Downtime &amp; Stoppage Reasons{!showStoppageDetails && <span className="font-normal text-slate-400">(sum)</span>}
+                </button>
+              </th>
+              {showStoppageDetails && STOPPAGE_FIELDS.map((f) => (
                 <th key={f.key} className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">
                   {f.label.replace(" (Minutes)", "")}
                 </th>
@@ -1589,7 +1576,7 @@ const GrindingEntry = () => {
           </thead>
           <tbody>
             {filteredEntries.length === 0 && (
-              <tr><td colSpan={14 + STOPPAGE_FIELDS.length + REJECTION_FIELDS.length + 1 + 5 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
+              <tr><td colSpan={14 + 1 + (showStoppageDetails ? STOPPAGE_FIELDS.length : 0) + REJECTION_FIELDS.length + 1 + 5 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
                 {loadingSheet ? "Loading…" : sheetSearch ? "No entries match your search." : "No entries for this machine yet."}
               </td></tr>
             )}
@@ -1601,6 +1588,25 @@ const GrindingEntry = () => {
               // of stacked values reads as one grouped strip at a glance.
               const isMultiRow = group.length > 1;
               const plainBg = isMultiRow ? "bg-slate-50 dark:bg-slate-800/60" : "bg-white dark:bg-[#1a1a1a]";
+              // Batch totals for every stacked numeric column — only rendered
+              // as an extra stacked line (via withTotal) when isMultiRow.
+              const overtimeTotal = sumBy(group, (e) => (e.calculated || {}).overtimeMin);
+              const startDelayTotal = sumBy(group, (e) => (e.calculated || {}).startDelayMin);
+              const earlyClosedTotal = sumBy(group, (e) => (e.calculated || {}).earlyClosedMin);
+              const processQtyTotal = sumBy(group, (e) => e.processQty);
+              const okQtyTotal = sumBy(group, (e) => e.okQty);
+              const rejectedQtyTotal = sumBy(group, (e) => e.rejectedQty);
+              const workingScheduleTotal = sumBy(group, (e) => (e.calculated || {}).workingScheduleMin);
+              const stoppageSumTotal = sumBy(group, (e) => STOPPAGE_FIELDS.reduce((s, f) => s + (Number(e[f.key]) || 0), 0));
+              const totalStoppageTotal = sumBy(group, (e) => (e.calculated || {}).totalStoppageMin);
+              const availableWorkingTotal = sumBy(group, (e) => (e.calculated || {}).availableWorkingMin);
+              const idealProductionQtyTotal = sumBy(group, (e) => (e.calculated || {}).idealProductionQty);
+              const effectiveMcRunTimeTotal = sumBy(group, (e) => (e.calculated || {}).effectiveMcRunTimeMin);
+              const unreportedTimeTotal = sumBy(group, (e) => (e.calculated || {}).unreportedTimeMin);
+              const availabilityRatioTotal = sumBy(group, (e) => (e.calculated || {}).availabilityRatio);
+              const performanceRatioTotal = sumBy(group, (e) => (e.calculated || {}).performanceRatio);
+              const qualityRatioTotal = sumBy(group, (e) => (e.calculated || {}).qualityRatio);
+              const oeeTotal = sumBy(group, (e) => (e.calculated || {}).oeePercent);
               return (
               <tr key={group.map((e) => e._id).join("-")} className="border-b border-slate-300 dark:border-slate-700 hover:bg-slate-50/60 transition-colors">
                 {/* Shared across the whole batch — Date/Machine/Operator/Shift are picked once per submission */}
@@ -1615,27 +1621,41 @@ const GrindingEntry = () => {
                 <td className={`${plainBg} px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400`}>{first.shiftOffTime || (typeof first.machine === "object" ? first.machine?.machineOffTime : null) || "—"}</td>
 
                 {/* Overtime / Start Delay / Early Closed */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtMin((e.calculated || {}).overtimeMin))} />
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtDelayOrEarly((e.calculated || {}).startDelayMin, (e.calculated || {}).earlyClosedMin))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmtMin((e.calculated || {}).overtimeMin)), fmtMin(overtimeTotal))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmtDelayOrEarly((e.calculated || {}).startDelayMin, (e.calculated || {}).earlyClosedMin)), fmtDelayOrEarly(startDelayTotal, earlyClosedTotal))} />
 
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.sizeWidthMm}×${e.sizeHeightMm}`)} />
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.thicknessMm} mm`)} />
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => fmt(e.standardTimePerPieceMin, "min"))} />
-                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.processQty} qty`)} />
-                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.okQty} qty`)} />
-                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold`} items={group.map((e) => `${e.rejectedQty} qty`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={withTotal(group.map((e) => `${e.processQty} qty`), `${processQtyTotal} qty`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={withTotal(group.map((e) => `${e.okQty} qty`), `${okQtyTotal} qty`)} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-red-500 font-bold`} items={withTotal(group.map((e) => `${e.rejectedQty} qty`), `${rejectedQtyTotal} qty`)} />
 
                 {/* Individual Rejection Reason values */}
                 {REJECTION_FIELDS.map((f) => (
-                  <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e[f.key] || 0} qty`)} />
+                  <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={withTotal(
+                    group.map((e) => `${e[f.key] || 0} qty`),
+                    `${sumBy(group, (e) => e[f.key])} qty`,
+                  )} />
                 ))}
 
                 {/* Working Schedule Time */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).workingScheduleMin, UNIT_BY_CALC_KEY.workingScheduleMin))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmt((e.calculated || {}).workingScheduleMin, UNIT_BY_CALC_KEY.workingScheduleMin)), fmt(workingScheduleTotal, UNIT_BY_CALC_KEY.workingScheduleMin))} />
 
-                {/* Individual stoppage reason values */}
-                {STOPPAGE_FIELDS.map((f) => (
-                  <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => fmt(e[f.key], "min"))} />
+                {/* Downtime & Stoppage Reasons — collapsed cell shows the sum
+                    of all 10 reason fields (incl. Planned Downtime, unlike
+                    the "Total Stoppage" calculated column later on which
+                    excludes it) so it's never blank; individual values only
+                    render when expanded. */}
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={withTotal(
+                  group.map((e) => fmt(STOPPAGE_FIELDS.reduce((s, f) => s + (Number(e[f.key]) || 0), 0), "min")),
+                  fmt(stoppageSumTotal, "min"),
+                )} />
+                {showStoppageDetails && STOPPAGE_FIELDS.map((f) => (
+                  <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={withTotal(
+                    group.map((e) => fmt(e[f.key], "min")),
+                    fmt(sumBy(group, (e) => e[f.key]), "min"),
+                  )} />
                 ))}
 
                 {/* Remark — hidden by default, "eye" opens a popover with the Others-downtime note */}
@@ -1656,34 +1676,34 @@ const GrindingEntry = () => {
                 ))} />
 
                 {/* Total Stoppage */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).totalStoppageMin, UNIT_BY_CALC_KEY.totalStoppageMin))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmt((e.calculated || {}).totalStoppageMin, UNIT_BY_CALC_KEY.totalStoppageMin)), fmt(totalStoppageTotal, UNIT_BY_CALC_KEY.totalStoppageMin))} />
                 {/* Available Working Time */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).availableWorkingMin, UNIT_BY_CALC_KEY.availableWorkingMin))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmt((e.calculated || {}).availableWorkingMin, UNIT_BY_CALC_KEY.availableWorkingMin)), fmt(availableWorkingTotal, UNIT_BY_CALC_KEY.availableWorkingMin))} />
                 {/* Ideal Production */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).idealProductionQty, UNIT_BY_CALC_KEY.idealProductionQty))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmt((e.calculated || {}).idealProductionQty, UNIT_BY_CALC_KEY.idealProductionQty)), fmt(idealProductionQtyTotal, UNIT_BY_CALC_KEY.idealProductionQty))} />
                 {/* Effective M/C Run Time */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).effectiveMcRunTimeMin, UNIT_BY_CALC_KEY.effectiveMcRunTimeMin))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmt((e.calculated || {}).effectiveMcRunTimeMin, UNIT_BY_CALC_KEY.effectiveMcRunTimeMin)), fmt(effectiveMcRunTimeTotal, UNIT_BY_CALC_KEY.effectiveMcRunTimeMin))} />
                 {/* Unreported Time */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).unreportedTimeMin, UNIT_BY_CALC_KEY.unreportedTimeMin))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmt((e.calculated || {}).unreportedTimeMin, UNIT_BY_CALC_KEY.unreportedTimeMin)), fmt(unreportedTimeTotal, UNIT_BY_CALC_KEY.unreportedTimeMin))} />
 
                 {/* Availability / Performance / Quality Ratios */}
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtRatioPct((e.calculated || {}).availabilityRatio))} />
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtRatioPct((e.calculated || {}).performanceRatio))} />
-                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmtRatioPct((e.calculated || {}).qualityRatio))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmtRatioPct((e.calculated || {}).availabilityRatio)), fmtRatioPct(availabilityRatioTotal))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmtRatioPct((e.calculated || {}).performanceRatio)), fmtRatioPct(performanceRatioTotal))} />
+                <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={withTotal(group.map((e) => fmtRatioPct((e.calculated || {}).qualityRatio)), fmtRatioPct(qualityRatioTotal))} />
 
                 {/* OEE % */}
                 <StackedCell
-                  className="sticky right-[90px] z-10 px-3 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-blue-50 dark:bg-slate-900 font-bold text-brand-700 dark:text-brand-300 shadow-[-4px_0_10px_rgba(0,0,0,0.05)] w-[100px] min-w-[100px] max-w-[100px]"
-                  items={group.map((e) => {
+                  className="sticky right-[90px] z-10 px-3 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-blue-50 dark:bg-slate-900 font-bold text-brand-700 dark:text-brand-300 shadow-[-4px_0_10px_rgba(0,0,0,0.05)] w-[110px] min-w-[110px] max-w-[110px]"
+                  items={withTotal(group.map((e) => {
                     const c = e.calculated || {};
                     return <React.Fragment key={e._id}>{fmt(c.oeePercent)}{c.oeePercent == null || isNaN(c.oeePercent) ? "" : "%"}</React.Fragment>;
-                  })}
+                  }), `${fmt(oeeTotal)}%`, { stacked: true })}
                 />
 
                 <StackedCell
                   className="sticky right-0 z-10 w-[90px] px-3 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] shadow-[-4px_0_10px_rgba(0,0,0,0.05)]"
                   items={group.map((e) => {
-                    const editable = isEntryEditable(parseLocalDate(e.date));
+                    const editable = isEntryEditable(parseLocalDate(e.date), new Date(), 2, holidaySet);
                     return (
                       <div key={e._id} className="flex justify-end gap-2">
                         {currentPagePermissions.edit && (

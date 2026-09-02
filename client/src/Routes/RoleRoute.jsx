@@ -11,7 +11,6 @@ import FullPageLoader from "../Components/Common/FullPageLoader";
 // profile, etc). Matched against the last segment(s) of the path.
 const PERMISSION_EXEMPT_SUFFIXES = [
   "/home",
-  "/hqepl-dashboard",
   "/profile",
   "/settings",
   "/shortcuts",
@@ -61,14 +60,14 @@ export default function RoleRoute() {
 
   if (expectedSlug && roleSlug !== expectedSlug) {
     const fallback = adminData?.roleType === "SuperAdmin"
-      ? `/hqepl/hqepl-dashboard`
+      ? `/hqepl/home`
       : `/${expectedSlug}/home`;
     return <Navigate to={fallback} replace />;
   }
 
   // Admin routing to an employee URL should bounce to the admin's redirectUrl
   if (expectedSlug !== 'hqepl' && adminData.roleType === 'SuperAdmin') {
-    return <Navigate to={adminData?.redirectUrl || '/hqepl/hqepl-dashboard'} replace />;
+    return <Navigate to={adminData?.redirectUrl || '/hqepl/home'} replace />;
   }
 
   return <Outlet />;
@@ -90,7 +89,7 @@ export function PageGuard({ children, allowedRoles }) {
 
   if (allowedRoles && !allowedRoles.includes(adminData.roleType)) {
     const fallback = adminData?.roleType === "SuperAdmin"
-      ? `/hqepl/hqepl-dashboard`
+      ? `/hqepl/home`
       : `/${expectedSlug}/home`;
     return <Navigate to={fallback} replace />;
   }

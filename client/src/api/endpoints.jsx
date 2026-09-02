@@ -70,13 +70,6 @@ export const ENDPOINTS = {
         SHIFT_TIME_REPORT: `${V1}/production-entries/shift-time-report`,
     },
 
-    // Shift Master endpoints
-    SHIFTS: {
-        BASE: `${V1}/shifts`,
-        BY_ID: (id) => `${V1}/shifts/${id}`,
-        SEARCH: `${V1}/shifts/search`,
-    },
-
     // Operator Master endpoints
     OPERATORS: {
         BASE: `${V1}/operators`,
@@ -89,6 +82,12 @@ export const ENDPOINTS = {
         BASE: `${V1}/standard-times`,
         BY_ID: (id) => `${V1}/standard-times/${id}`,
         SEARCH: `${V1}/standard-times/search`,
+    },
+
+    // Company Holiday Master endpoints
+    COMPANY_HOLIDAYS: {
+        BASE: `${V1}/company-holidays`,
+        BY_ID: (id) => `${V1}/company-holidays/${id}`,
     },
 
     // Employee endpoints

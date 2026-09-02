@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const AppError = require("../utils/AppError");
 const User = require("../models/user.model");
 const Employee = require("../models/Employee");
+const RoleMaster = require("../models/RoleMaster");
 
 const protect = async (req, res, next) => {
   try {
@@ -40,6 +41,24 @@ const protect = async (req, res, next) => {
 
     if (currentUser.isBlocked) {
       return next(new AppError("Your account has been blocked.", 403));
+    }
+
+    // Deactivated accounts must be cut off immediately, not just hidden from
+    // list views — otherwise a token issued before deactivation keeps
+    // working until it expires.
+    if (currentUser.isActive === false) {
+      return next(new AppError("Your account has been deactivated. Contact your administrator.", 403));
+    }
+
+    // A deactivated Role should cut off its members the same way — checked
+    // separately (not via populate) so req.user.roleId stays a plain
+    // ObjectId, which the rest of the app (e.g. requireMenuPermission)
+    // relies on for direct query use.
+    if (currentUser.roleId) {
+      const role = await RoleMaster.findById(currentUser.roleId).select("isActive").lean();
+      if (role && role.isActive === false) {
+        return next(new AppError("Your role has been deactivated. Contact your administrator.", 403));
+      }
     }
 
     req.user = currentUser;

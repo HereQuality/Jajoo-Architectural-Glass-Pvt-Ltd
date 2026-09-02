@@ -17,17 +17,15 @@ const signToken = (id, roleType, remember) => {
 };
 
 // Works out where this account should land after login, based on role.
-// - SuperAdmin -> the /hqepl admin section
+// - SuperAdmin -> /hqepl/home
 // - Employee -> their own custom role slug (set in Employee Management > Manage Role)
 // Strips the leading path segment (e.g. "/manager/dashboard" -> "/dashboard")
 // so a stored menu URL can be re-prefixed with the employee's own roleSlug.
 const stripFirstSegment = (path) => path.replace(/^\/[^/]+/, '');
 
 // Works out where this account should land after login, based on role.
-// - SuperAdmin -> the /hqepl admin section (always full access)
-// - Employee -> only Dashboard if their role was granted it; otherwise the
-//   first menu item their role actually has "read" access to; otherwise
-//   a safe fallback with no accessible pages.
+// Everyone (SuperAdmin and every Employee role alike) lands on their own
+// portal's Home — there's no separate SuperAdmin-only landing page.
 const getDefaultRedirectUrl = async (roleType, roleSlug, roleId) => {
   const slug = roleSlug || "employee";
   return `/${slug}/home`;
@@ -95,7 +93,7 @@ exports.login = async (req, res) => {
         $or: [{ username: loginId.toLowerCase() }, { emailOffice: loginId.toLowerCase() }]
       })
       .populate('departmentIds', 'departmentName')
-      .populate('roleId', 'roleName')
+      .populate('roleId', 'roleName isActive')
       .select('+password');
       roleType = 'Employee';
     }
@@ -109,6 +107,26 @@ exports.login = async (req, res) => {
       return res.status(403).json({
         status: 'fail',
         message: 'Your account has been blocked.'
+      });
+    }
+
+    // 3a. Check if account has been deactivated (soft-deleted) — a
+    // deactivated account should never be able to log in, but this used to
+    // only affect list views, not auth.
+    if (account.isActive === false) {
+      return res.status(403).json({
+        status: 'fail',
+        message: 'Your account has been deactivated. Contact your administrator.'
+      });
+    }
+
+    // 3b. For Employees, a deactivated Role should block its members too —
+    // otherwise soft-deleting a role from Manage Role doesn't actually stop
+    // its employees from logging in.
+    if (roleType === 'Employee' && account.roleId && account.roleId.isActive === false) {
+      return res.status(403).json({
+        status: 'fail',
+        message: 'Your role has been deactivated. Contact your administrator.'
       });
     }
 

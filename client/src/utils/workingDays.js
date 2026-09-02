@@ -4,17 +4,45 @@
  * actually enforces the 2-working-day edit window; this one must never be
  * trusted as the source of truth.
  *
- * Working week: Mon/Wed/Thu/Fri/Sat/Sun — Tuesday (day 2) is off.
+ * Working week: Mon/Wed/Thu/Fri/Sat/Sun — Tuesday (day 2) is off. Company
+ * holidays are skipped the same way Tuesday is — see buildHolidaySet.
  */
 
 const OFF_DAY = 2; // Date#getDay(): 0=Sun..6=Sat, 2=Tuesday
 
-export function isWorkingDay(date) {
-  return date.getDay() !== OFF_DAY;
+function dateKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function monthDayKey(d) {
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-// Counts working (non-Tuesday) calendar days strictly after `entryDate`, up to and including `now`.
-export function workingDaysElapsed(entryDate, now) {
+// Builds a lookup from a list of CompanyHoliday records (or plain
+// {date, isRecurringYearly} objects) — build once (e.g. via useMemo), not
+// per day, since workingDaysElapsed calls isWorkingDay in a loop.
+export function buildHolidaySet(holidays = []) {
+  const exact = new Set();
+  const recurring = new Set();
+  for (const h of holidays) {
+    const d = new Date(h.date);
+    if (Number.isNaN(d.getTime())) continue;
+    if (h.isRecurringYearly) recurring.add(monthDayKey(d));
+    else exact.add(dateKey(d));
+  }
+  return { exact, recurring };
+}
+
+function isHoliday(date, holidaySet) {
+  if (!holidaySet) return false;
+  return holidaySet.exact.has(dateKey(date)) || holidaySet.recurring.has(monthDayKey(date));
+}
+
+export function isWorkingDay(date, holidaySet) {
+  return date.getDay() !== OFF_DAY && !isHoliday(date, holidaySet);
+}
+
+// Counts working (non-Tuesday, non-holiday) calendar days strictly after `entryDate`, up to and including `now`.
+export function workingDaysElapsed(entryDate, now, holidaySet) {
   const cursor = new Date(entryDate);
   cursor.setHours(0, 0, 0, 0);
   const end = new Date(now);
@@ -23,13 +51,13 @@ export function workingDaysElapsed(entryDate, now) {
   let count = 0;
   while (cursor < end) {
     cursor.setDate(cursor.getDate() + 1);
-    if (isWorkingDay(cursor)) count++;
+    if (isWorkingDay(cursor, holidaySet)) count++;
   }
   return count;
 }
 
-export function isEntryEditable(entryDate, now = new Date(), maxWorkingDays = 2) {
-  return workingDaysElapsed(entryDate, now) <= maxWorkingDays;
+export function isEntryEditable(entryDate, now = new Date(), maxWorkingDays = 2, holidaySet) {
+  return workingDaysElapsed(entryDate, now, holidaySet) <= maxWorkingDays;
 }
 
 // Parses a "YYYY-MM-DD" (or ISO datetime) string into a local Date, avoiding

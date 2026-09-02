@@ -20,7 +20,6 @@ const { rewriteUploadPaths } = require("../utils/fileUrl");
 const router = express.Router();
 
 const MENU_URL = "/employee-management/employee";
-const TEAM_MEMBERS_URLS = ["/access-panel", "/employee-management/team-members"];
 
 router.use(protect);
 router.use(authorize("SuperAdmin", "Employee"));
@@ -31,11 +30,18 @@ router.get("/", requireMenuPermission(MENU_URL, "read"), listAllEmployees);
 router.post("/search", requireMenuPermission(MENU_URL, "read"), listEmployeesByParams);
 router.post("/department/:departmentId", requireMenuPermission(MENU_URL, "read"), listAllEmployeesByDepartment);
 
-// ── Team Members page endpoints (separate permission, must be BEFORE /:employeeId) ──
+// ── Team Members page endpoints (SuperAdmin only, must be BEFORE /:employeeId) ──
 // Static sub-paths must come before dynamic /:employeeId or Express will
 // match "team-members" as an employeeId and hit the wrong handler.
-router.get("/team-members/list", requireMenuPermission(TEAM_MEMBERS_URLS, "read"), listTeamMembers);
-router.post("/:employeeId/impersonate", requireMenuPermission(TEAM_MEMBERS_URLS, "write"), impersonateEmployee);
+// This isn't a normal menu-permission page — it lets one account impersonate
+// another, so it's intentionally not delegable to any custom role, ever
+// (previously this relied on requireMenuPermission against menu URLs that
+// were never seeded, which happened to also always block Employees, but for
+// the wrong reason — a role granted "manage-role" style full access could
+// never actually be given this, but the failure mode was an opaque "page
+// not available" 403 rather than an explicit, correct restriction).
+router.get("/team-members/list", authorize("SuperAdmin"), listTeamMembers);
+router.post("/:employeeId/impersonate", authorize("SuperAdmin"), impersonateEmployee);
 
 // ── Dynamic employee ID routes ────────────────────────────────────────────
 router.get("/:employeeId", requireMenuPermission(MENU_URL, "read"), getEmployeeById);

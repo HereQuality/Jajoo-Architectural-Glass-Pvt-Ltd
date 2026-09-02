@@ -20,6 +20,7 @@ const connectDB = require("../config/db");
 const User = require("../models/user.model");
 const MenuGroupMaster = require("../models/MenuGroupMaster");
 const MenuMaster = require("../models/MenuMaster");
+const EmployeeRoles = require("../models/EmployeeRoles");
 
 const SUPERADMIN = {
   name: "HQEPL Admin",
@@ -30,15 +31,6 @@ const SUPERADMIN = {
 };
 
 // ── Menu groups & menus ──────────────────────────────────────────────
-const HQEPL_DASHBOARD_GROUP = {
-  menuGroupName: "hqepl-dashboard",
-  sequence: 2,
-  isLink: true,
-  menuUrl: "/hqepl/hqepl-dashboard",
-  portal: "SuperAdmin",
-  icon: "ShieldCheck",
-};
-
 const EMPLOYEE_DASHBOARD_GROUP = {
   menuGroupName: "Home",
   sequence: 1,
@@ -50,7 +42,7 @@ const EMPLOYEE_DASHBOARD_GROUP = {
 
 const ADMINISTRATION_GROUP = {
   menuGroupName: "Administration",
-  sequence: 3,
+  sequence: 2,
   isLink: false,
   portal: "SuperAdmin",
   icon: "Settings",
@@ -66,7 +58,7 @@ const ADMINISTRATION_MENUS = [
 // link, not a group with children.
 const DASHBOARD_GROUP = {
   menuGroupName: "Dashboard",
-  sequence: 4,
+  sequence: 3,
   isLink: true,
   menuUrl: "/hqepl/dashboard",
   portal: "Both",
@@ -75,7 +67,7 @@ const DASHBOARD_GROUP = {
 
 const EMPLOYEE_MANAGEMENT_GROUP = {
   menuGroupName: "Employee Management",
-  sequence: 5,
+  sequence: 4,
   isLink: false,
   portal: "Both",
   icon: "Users",
@@ -84,7 +76,7 @@ const EMPLOYEE_MANAGEMENT_GROUP = {
 // Config/setup pages for the Production module.
 const SETUP_GROUP = {
   menuGroupName: "Setup",
-  sequence: 6,
+  sequence: 5,
   isLink: false,
   portal: "Both",
   icon: "Wrench",
@@ -94,7 +86,7 @@ const SETUP_GROUP = {
 // (Cutting, Edging, etc.) each get their own entry here as they're built.
 const DATA_ENTRY_GROUP = {
   menuGroupName: "Data Entry",
-  sequence: 7,
+  sequence: 6,
   isLink: false,
   portal: "Both",
   icon: "ClipboardList",
@@ -114,6 +106,7 @@ const SETUP_MENUS = [
   { menuName: "Machine Master", menuUrl: "/hqepl/production/machines", sequence: 2, icon: "Factory" },
   { menuName: "Operator Master", menuUrl: "/hqepl/production/operators", sequence: 3, icon: "UserCog" },
   { menuName: "Standard Time Master", menuUrl: "/hqepl/production/standard-time", sequence: 4, icon: "Timer" },
+  { menuName: "Holiday Master", menuUrl: "/hqepl/production/holidays", sequence: 5, icon: "CalendarOff" },
 ];
 
 const DATA_ENTRY_MENUS = [
@@ -129,7 +122,7 @@ const DATA_ENTRY_MENUS = [
 //   - Employee with only "read": can raise their own tickets, nothing else.
 const SUPPORT_GROUP = {
   menuGroupName: "Support",
-  sequence: 8,
+  sequence: 7,
   isLink: true,
   menuUrl: "/hqepl/support",
   portal: "Both",
@@ -158,12 +151,25 @@ async function run() {
   }
 
   // ── 2. HQEPL (SuperAdmin) portal menus ───────────────────────────
-  // Clear old menus to prevent duplicates due to URL changes
+  // This wipes and recreates every menu/menu-group with a brand-new _id —
+  // safe on a genuinely fresh database, but EmployeeRoles stores each
+  // role's permissions keyed by the exact menuId/menuGroupId ObjectId, so
+  // doing this against a database that already has roles configured would
+  // silently orphan every one of them. Refuse to run against a live DB;
+  // use seedMenus.js instead, which upserts by natural key and never
+  // deletes/recreates these collections.
+  const existingRoleCount = await EmployeeRoles.countDocuments();
+  if (existingRoleCount > 0) {
+    throw new Error(
+      `Refusing to run: found ${existingRoleCount} existing EmployeeRoles document(s). ` +
+      `seed.js wipes and recreates MenuGroupMaster/MenuMaster with new IDs, which would ` +
+      `orphan every existing role's permissions. Run "npm run seed:menus" instead to add/ ` +
+      `update menus on a live database.`
+    );
+  }
   await MenuGroupMaster.deleteMany({});
   await MenuMaster.deleteMany({});
 
-  await upsertGroup(HQEPL_DASHBOARD_GROUP);
-  
   const adminGroup = await upsertGroup(ADMINISTRATION_GROUP);
   for (const menu of ADMINISTRATION_MENUS) {
     await MenuMaster.findOneAndUpdate(

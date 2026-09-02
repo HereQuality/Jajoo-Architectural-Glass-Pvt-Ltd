@@ -191,18 +191,36 @@ export default function Dashboard() {
     let sumProcess = 0;
     let sumOk = 0;
     let sumIdeal = 0;
+    let sumEffectiveRun = 0;
+    let sumStdMinutes = 0;
+    const seenBatchKeys = new Set();
 
     dayEntries.forEach(e => {
-      sumWork += (e.calculated?.workingScheduleMin || 0);
-      sumAvail += (e.calculated?.availableWorkingMin || 0);
       sumProcess += (Number(e.processQty) || 0);
       sumOk += (Number(e.okQty) || 0);
       sumIdeal += (e.calculated?.idealProductionQty || 0);
+      sumStdMinutes += (Number(e.processQty) || 0) * (Number(e.standardTimePerPieceMin) || 0);
+
+      // Working Schedule/Available Working/Effective Run Time are BATCH-level
+      // (identical across every entry saved together from one submission) —
+      // count each batch only once, keyed by batchId (a standalone entry is
+      // its own one-entry batch). Mirrors server/utils/oeeAggregate.js.
+      const batchKey = e.batchId ? String(e.batchId) : `_solo:${e._id}`;
+      if (!seenBatchKeys.has(batchKey)) {
+        seenBatchKeys.add(batchKey);
+        sumWork += (e.calculated?.workingScheduleMin || 0);
+        sumAvail += (e.calculated?.availableWorkingMin || 0);
+        sumEffectiveRun += (e.calculated?.effectiveMcRunTimeMin || 0);
+      }
     });
 
-    const availRatio = sumWork > 0 ? (sumAvail / sumWork) * 100 : 0;
+    // Availability = Effective Run Time ÷ Available Working Time. Performance
+    // = Standard Minutes for Output ÷ Effective Run Time. Mirrors
+    // server/services/productionCalculation.service.js's computeBatchCalculations
+    // (corrected 2026-08-31).
+    const availRatio = sumAvail > 0 ? (sumEffectiveRun / sumAvail) * 100 : 0;
     const qualRatio = sumProcess > 0 ? (sumOk / sumProcess) * 100 : 0;
-    const perfRatio = sumIdeal > 0 ? (sumProcess / sumIdeal) * 100 : 0;
+    const perfRatio = sumEffectiveRun > 0 ? (sumStdMinutes / sumEffectiveRun) * 100 : 0;
     const oee = (availRatio / 100) * (perfRatio / 100) * (qualRatio / 100) * 100;
 
     return {

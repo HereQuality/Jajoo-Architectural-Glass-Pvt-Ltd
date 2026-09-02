@@ -1,6 +1,6 @@
 const ProductionEntry = require("../models/ProductionEntry");
 const Machine = require("../models/Machine");
-const { computeCalculations } = require("../services/productionCalculation.service");
+const { computeBatchCalculations, computeRowIdealProductionQty } = require("../services/productionCalculation.service");
 const { resolveMachineFilter } = require("../utils/entryQuery");
 const { aggregateEfficiencyByGroup } = require("../utils/efficiencyAggregate");
 const { buildGrindingEfficiencyPdf } = require("../services/report.service");
@@ -111,7 +111,6 @@ function buildData(body) {
   const data = {
     machine: body.machine,
     operator: body.operator || undefined,
-    shift: body.shift,
     date: body.date || Date.now(),
     mcStartTime: body.mcStartTime,
     mcOffTime: body.mcOffTime,
@@ -131,19 +130,15 @@ function buildData(body) {
 }
 
 // Server-side backstop for the same check the client already runs before
-// submitting: Production Qty can't exceed what Available Working Time actually
-// allows at this Standard Time (Ideal Production). Re-derived from `data.
-// calculated` — the same numbers that get stored — so it can never disagree
-// with what the client saw.
+// submitting: Production Qty can't exceed what this row's own actual M/C
+// run time (M/C Off − M/C Start) allows at this Standard Time (Ideal
+// Production). Re-derived from `data.calculated` — the same number that
+// gets stored — so it can never disagree with what the client saw.
 function capacityError(data) {
   const ideal = data.calculated.idealProductionQty;
-  if (ideal === null) {
-    return `Not achievable: Available Working Time is NA — Planned Downtime + total Stoppage consumes the entire ` +
-      `Working Schedule Time, so there is no time left to grind any glass. Reduce downtime/stoppage minutes.`;
-  }
   if (ideal < data.processQty) {
-    return `Not achievable: Available Working Time ÷ Standard Time = ${ideal.toFixed(2)} pcs, ` +
-      `which is less than Production Qty (${data.processQty}). Reduce Production Qty or free up more Available Working Time.`;
+    return `Not achievable: this row's own M/C run time ÷ Standard Time = ${ideal.toFixed(2)} pcs, ` +
+      `which is less than Production Qty (${data.processQty}). Reduce Production Qty or check the M/C Start/Off Time.`;
   }
   return null;
 }
@@ -190,15 +185,16 @@ async function checkMachineTimeOverlap(body, excludeId) {
   return null;
 }
 
-// Computes Overtime/Start Delay/Early Closed/Working Schedule Time from
-// `data.shiftOnTime`/`shiftOffTime` — the snapshot the client already took
-// of the Machine's Shift Time Start/End when it was selected on this entry
-// (see the ProductionEntry model comment for why this is a snapshot, not a
-// live re-fetch: so a Machine's Shift Time changing later never silently
-// alters an already-saved entry's numbers). Only falls back to the
-// machine's CURRENT Shift Time when the snapshot is missing entirely —
-// legacy/defensive path, not the normal one.
-async function applyShiftCalculations(data) {
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+// Resolves Shift On/Off Time: prefer the entry's own snapshot (taken from
+// the Machine when the entry was saved — see the ProductionEntry model
+// comment for why this is a snapshot, not a live re-fetch), only falling
+// back to the Machine's CURRENT Shift Time when the snapshot is missing
+// entirely (legacy/defensive path, not the normal one).
+async function resolveShiftTimes(data) {
   let shiftOnTime = data.shiftOnTime;
   let shiftOffTime = data.shiftOffTime;
   if (!shiftOnTime || !shiftOffTime) {
@@ -206,8 +202,58 @@ async function applyShiftCalculations(data) {
     shiftOnTime = shiftOnTime || machine?.machineOnTime;
     shiftOffTime = shiftOffTime || machine?.machineOffTime;
   }
-  data.calculated = computeCalculations({ ...data, shiftOnTime, shiftOffTime });
-  data.overtimeMin = data.calculated.overtimeMin;
+  return { shiftOnTime, shiftOffTime };
+}
+
+// Working Schedule Time / Total Stoppage / Available Working Time /
+// Effective M/C Run Time / Availability / Performance / Quality / OEE % are
+// BATCH-level — shared identically across every entry saved together from
+// one "Add Entry" submission (see computeBatchCalculations). So saving,
+// editing, or deleting ANY row in a batch changes the numbers for every
+// OTHER row in it too — this recomputes the batch from `rows` and writes
+// the refreshed numbers onto every row in `rows` that already exists in the
+// DB (i.e. has an `_id`); a row without one yet (the entry currently being
+// created) just gets `calculated`/`overtimeMin` set on the object in memory
+// for the caller to save itself.
+async function recomputeBatchAndSave(rows, shiftOnTime, shiftOffTime) {
+  const batchCalc = computeBatchCalculations(rows, shiftOnTime, shiftOffTime);
+  for (const row of rows) {
+    const idealProductionQty = round2(computeRowIdealProductionQty(row));
+    const calculated = { ...batchCalc, idealProductionQty };
+    if (row._id) {
+      await ProductionEntry.updateOne({ _id: row._id }, { calculated, overtimeMin: batchCalc.overtimeMin });
+    }
+    row.calculated = calculated;
+    row.overtimeMin = batchCalc.overtimeMin;
+  }
+  return batchCalc;
+}
+
+// Recomputes and saves every entry still in the DB for `batchId` (used
+// after removing a row from a batch, or moving one out of it — the
+// remaining siblings' batch-level numbers must drop that row's
+// contribution). No-op when nobody's left in that batch.
+async function recomputeExistingBatch(batchId, excludeEntryId) {
+  if (!batchId) return;
+  const query = { batchId };
+  if (excludeEntryId) query._id = { $ne: excludeEntryId };
+  const siblings = await ProductionEntry.find(query).lean();
+  if (siblings.length === 0) return;
+  const { shiftOnTime, shiftOffTime } = await resolveShiftTimes(siblings[0]);
+  await recomputeBatchAndSave(siblings, shiftOnTime, shiftOffTime);
+}
+
+// Computes and applies batch-level `calculated`/`overtimeMin` for `data`
+// (the entry currently being created/updated), together with every OTHER
+// entry already saved under the same batchId — those siblings get their
+// stored `calculated` refreshed too, since adding/editing this row changes
+// the batch's totals for all of them.
+async function applyShiftCalculations(data, excludeEntryId) {
+  const { shiftOnTime, shiftOffTime } = await resolveShiftTimes(data);
+  const query = data.batchId ? { batchId: data.batchId } : null;
+  if (query && excludeEntryId) query._id = { $ne: excludeEntryId };
+  const siblings = query ? await ProductionEntry.find(query).lean() : [];
+  await recomputeBatchAndSave([...siblings, data], shiftOnTime, shiftOffTime);
 }
 
 exports.createProductionEntry = async (req, res) => {
@@ -235,7 +281,6 @@ exports.createProductionEntry = async (req, res) => {
     const populated = await entry.populate([
       { path: "machine", select: "machineName machineCode machineOnTime machineOffTime" },
       { path: "operator", select: "name" },
-      { path: "shift", select: "shiftName shiftOnTime shiftOffTime" },
     ]);
     res.status(201).json({ isOk: true, data: populated, message: "Entry saved successfully" });
   } catch (err) {
@@ -256,7 +301,7 @@ exports.updateProductionEntry = async (req, res) => {
     // happens to have a pre-existing overlap from before this check existed
     // would permanently block that edit for a conflict the user isn't
     // touching.
-    const existingEntry = await ProductionEntry.findById(entryId).select("mcStartTime mcOffTime machine date").lean();
+    const existingEntry = await ProductionEntry.findById(entryId).select("mcStartTime mcOffTime machine date batchId").lean();
     if (!existingEntry) return res.status(404).json({ isOk: false, message: "Entry not found" });
     const timeRelevantFieldsChanged =
       existingEntry.mcStartTime !== req.body.mcStartTime ||
@@ -271,7 +316,7 @@ exports.updateProductionEntry = async (req, res) => {
     }
 
     const data = buildData(req.body);
-    await applyShiftCalculations(data);
+    await applyShiftCalculations(data, entryId);
     const capacityMsg = capacityError(data);
     if (capacityMsg) {
       return res.status(400).json({ isOk: false, errors: { processQty: capacityMsg }, message: capacityMsg });
@@ -279,10 +324,17 @@ exports.updateProductionEntry = async (req, res) => {
 
     const entry = await ProductionEntry.findOneAndUpdate({ _id: entryId }, data, {
       new: true, runValidators: true,
-    }).populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name")
-      .populate("shift", "shiftName shiftOnTime shiftOffTime");
+    }).populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name");
 
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
+
+    // If this row moved out of (or into a different) batch, its OLD
+    // batch's remaining siblings still need their batch-level numbers
+    // recomputed without this row's contribution.
+    if (existingEntry.batchId && String(existingEntry.batchId) !== String(data.batchId || "")) {
+      await recomputeExistingBatch(existingEntry.batchId, entryId);
+    }
+
     res.status(200).json({ isOk: true, data: entry, message: "Entry updated successfully" });
   } catch (err) {
     console.error(err);
@@ -294,6 +346,12 @@ exports.deleteProductionEntry = async (req, res) => {
   try {
     const entry = await ProductionEntry.findByIdAndDelete(req.params.entryId);
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
+
+    // Removing this row changes the batch's totals for whoever's left in it.
+    if (entry.batchId) {
+      await recomputeExistingBatch(entry.batchId, entry._id);
+    }
+
     res.status(200).json({ isOk: true, message: "Entry deleted successfully" });
   } catch (err) {
     console.error(err);
@@ -304,8 +362,7 @@ exports.deleteProductionEntry = async (req, res) => {
 exports.getProductionEntryById = async (req, res) => {
   try {
     const entry = await ProductionEntry.findById(req.params.entryId)
-      .populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name")
-      .populate("shift", "shiftName shiftOnTime shiftOffTime");
+      .populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name");
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
     res.status(200).json({ isOk: true, data: entry });
   } catch (err) {
@@ -427,7 +484,6 @@ exports.listProductionEntries = async (req, res) => {
       ProductionEntry.countDocuments(query),
       ProductionEntry.find(query)
         .populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name")
-        .populate("shift", "shiftName shiftOnTime shiftOffTime")
         .sort({ date: -1, createdAt: -1 })
         .skip(parseInt(skip))
         .limit(parseInt(per_page))
@@ -457,7 +513,6 @@ exports.getShiftTimeReport = async (req, res) => {
 
     const entries = await ProductionEntry.find(query)
       .populate("machine", "machineName machineCode machineOnTime machineOffTime")
-      .populate("shift", "shiftName shiftOnTime shiftOffTime")
       .sort({ date: -1, mcStartTime: -1 })
       .lean();
 
@@ -468,11 +523,11 @@ exports.getShiftTimeReport = async (req, res) => {
     // they're always zero-padded to the same width. Prefers the entry's own
     // shiftOnTime/shiftOffTime SNAPSHOT (what it actually ran under —
     // doesn't drift if the machine's Shift Time is edited later); falls
-    // back to the machine's current config, then the legacy `shift` ref,
-    // only for entries saved before snapshotting existed.
+    // back to the machine's current config only for entries saved before
+    // snapshotting existed.
     const rows = entries.map((e) => {
-      const shiftOnTime = e.shiftOnTime || e.machine?.machineOnTime || e.shift?.shiftOnTime || null;
-      const shiftOffTime = e.shiftOffTime || e.machine?.machineOffTime || e.shift?.shiftOffTime || null;
+      const shiftOnTime = e.shiftOnTime || e.machine?.machineOnTime || null;
+      const shiftOffTime = e.shiftOffTime || e.machine?.machineOffTime || null;
       const effectiveStartTime = shiftOnTime
         ? (e.mcStartTime < shiftOnTime ? e.mcStartTime : shiftOnTime)
         : e.mcStartTime;
@@ -484,7 +539,6 @@ exports.getShiftTimeReport = async (req, res) => {
         _id: e._id,
         date: e.date,
         machineName: e.machine?.machineName || "Unknown Machine",
-        shiftName: e.shift?.shiftName || "—",
         shiftOnTime,
         shiftOffTime,
         mcStartTime: e.mcStartTime,

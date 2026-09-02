@@ -43,10 +43,20 @@ const connectDB = require("../config/db");
 const Machine = require("../models/Machine");
 const Operator = require("../models/Operator");
 const Process = require("../models/Process");
-const Shift = require("../models/Shift");
 const StandardTime = require("../models/StandardTime");
 const ProductionEntry = require("../models/ProductionEntry");
-const { computeCalculations } = require("../services/productionCalculation.service");
+const { computeBatchCalculations, computeRowIdealProductionQty } = require("../services/productionCalculation.service");
+
+// This seed script only ever generates standalone (non-batched) entries, so
+// each one is simply a batch of one — see productionCalculation.service.js
+// for why Working Schedule/Total Stoppage/Available Working/Effective Run
+// Time are computed at the batch level.
+function computeCalculations(entry) {
+  return {
+    ...computeBatchCalculations([entry], entry.shiftOnTime, entry.shiftOffTime),
+    idealProductionQty: round2(computeRowIdealProductionQty(entry)),
+  };
+}
 
 const SEED_TAG = "[seed-data]";
 const DAYS_BACK = 13; // + today = 14 days total
@@ -104,15 +114,11 @@ function dateNDaysAgo(n) {
   return d.toISOString().split("T")[0];
 }
 
-// Real Jajoo Glass shift — upserted (never deleted/recreated) so its _id
-// stays stable across re-runs, same as seedMenus.js's approach for menus.
-async function seedShift() {
-  return Shift.findOneAndUpdate(
-    { shiftName: "General Shift" },
-    { shiftName: "General Shift", shiftOnTime: "09:00", shiftOffTime: "18:00", isActive: true },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
-  );
-}
+// Real Jajoo Glass shift schedule used to jitter realistic entry times —
+// there's no separate Shift master collection anymore, just a plain
+// constant, since this seed script only needs an on/off time to jitter
+// around, not a persisted record.
+const SHIFT = { shiftName: "General Shift", shiftOnTime: "09:00", shiftOffTime: "18:00" };
 
 // Jitters an "HH:mm" time by a random offset (minutes, may be negative),
 // wrapping around midnight — used to give M/C Start/Off Time realistic
@@ -263,7 +269,7 @@ async function run() {
 
   console.log(`Using ${machines.length} real active Grinding machines and ${operators.length} real active operators.`);
 
-  const shift = await seedShift();
+  const shift = SHIFT;
   console.log(`Using shift "${shift.shiftName}" (${shift.shiftOnTime}–${shift.shiftOffTime}).`);
 
   await seedStandardTimes(machines);
