@@ -20,6 +20,11 @@ const mongoose = require("mongoose");
  * must keep calculating against the window they actually ran under, even
  * when later edited for an unrelated field (e.g. fixing OK Qty) — each
  * entry works off its own snapshot, independently of the others.
+ * `lunchStartTime` is the same kind of snapshot, taken from the Machine's
+ * optional Lunch Break config (also set in Machine Master) — when this
+ * entry's own M/C time fully covers that 1-hour window, it's added to
+ * Total Stoppage as `calculated.lunchMin` (see
+ * productionCalculation.service.js's computeLunchMin).
  *
  * Optional stoppage / downtime fields (default 0, max 1440 min):
  *   plannedDowntimeMin, overtimeMin (auto-derived, see above),
@@ -56,6 +61,31 @@ const ProductionEntrySchema = new mongoose.Schema(
       required: [true, "M/C Off Time is required"],
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "M/C Off Time must be HH:mm"],
     },
+    // Extra M/C ON/OFF periods for THIS SAME entry, beyond the primary
+    // mcStartTime/mcOffTime pair above — e.g. the machine ran, paused, then
+    // resumed, but it's still one production/downtime record (added
+    // 2026-09-06). Order doesn't matter; productionCalculation.service.js
+    // sorts all of a row's periods chronologically before use. Any gap
+    // between periods of the SAME row flows into that row's own Unreported
+    // Time exactly like a gap between two different rows already does.
+    additionalPeriods: {
+      type: [
+        {
+          _id: false,
+          startTime: {
+            type: String, // "HH:mm"
+            required: [true, "Additional period Start Time is required"],
+            match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Additional period Start Time must be HH:mm"],
+          },
+          endTime: {
+            type: String, // "HH:mm"
+            required: [true, "Additional period Off Time is required"],
+            match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Additional period Off Time must be HH:mm"],
+          },
+        },
+      ],
+      default: [],
+    },
     // Snapshot of the Machine's Shift Time Start/End at save time — see the
     // file-level comment above for why this isn't re-derived on every save.
     shiftOnTime: {
@@ -65,6 +95,13 @@ const ProductionEntrySchema = new mongoose.Schema(
     shiftOffTime: {
       type: String, // "HH:mm"
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Shift Off Time must be HH:mm"],
+    },
+    // Snapshot of the Machine's optional Lunch Break start time (1-hour
+    // slot) at save time — same reasoning as shiftOnTime/shiftOffTime above.
+    // Blank when the machine has no lunch break configured.
+    lunchStartTime: {
+      type: String, // "HH:mm"
+      match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Lunch Start Time must be HH:mm"],
     },
 
     // ── Size & thickness (from StandardTime master) ──────────────────────
@@ -140,6 +177,7 @@ const ProductionEntrySchema = new mongoose.Schema(
     // ── Server-calculated OEE fields (never set from client) ─────────────
     calculated: {
       shiftDurationMin:      { type: Number, default: 0 },
+      lunchMin:              { type: Number, default: 0 },
       totalStoppageMin:      { type: Number, default: 0 },
       workingScheduleMin:    { type: Number, default: 0 },
       availableWorkingMin:   { type: Number, default: 0 },

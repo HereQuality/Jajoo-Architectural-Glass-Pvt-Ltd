@@ -8,6 +8,7 @@ import { downloadOeeReport, downloadDailyOeeTrendReport, downloadDashboardOeeRep
 import { useMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import DatePicker from "../Components/Common/DatePicker";
+import { aggregateOee } from "../utils/productionCalculation";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, ReferenceLine, Cell, LabelList
 } from "recharts";
@@ -152,10 +153,15 @@ export default function Dashboard() {
   };
 
   // ── OEE Chart Data (Image 2 logic) ──
+  // Each point is that day's TRUE combined OEE% (via aggregateOee, summing
+  // quantities/minutes across every entry that day and deriving the ratios
+  // from those totals) — NOT an average of each entry's own oeePercent.
+  // An unweighted average would let one tiny job at 90% OEE and one huge job
+  // at 10% OEE average out to a misleading 50% for that day.
   const trendData = useMemo(() => {
     const [year, month] = chartMonth.split('-');
     const monthPrefix = `${year}-${month}`;
-    const dateStats = {};
+    const dayGroups = {};
     entries.forEach(e => {
       if (typeof e.date !== 'string' || !e.date.startsWith(monthPrefix)) return;
       // Use local date string YYYY-MM-DD
@@ -164,16 +170,15 @@ export default function Dashboard() {
       const [y, m, d] = datePart.split('-');
       const dStr = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${y}`;
       const realDateObj = new Date(Number(y), Number(m)-1, Number(d));
-      if (!dateStats[dStr]) dateStats[dStr] = { dateStr: dStr, realDate: realDateObj, sumOee: 0, count: 0 };
-      dateStats[dStr].sumOee += (e.calculated?.oeePercent || 0);
-      dateStats[dStr].count += 1;
+      if (!dayGroups[dStr]) dayGroups[dStr] = { dateStr: dStr, realDate: realDateObj, rows: [] };
+      dayGroups[dStr].rows.push(e);
     });
 
-    return Object.values(dateStats)
+    return Object.values(dayGroups)
       .sort((a,b) => a.realDate - b.realDate)
       .map(d => ({
         date: d.dateStr,
-        OEE: Number((d.sumOee / d.count).toFixed(2))
+        OEE: Number(aggregateOee(d.rows).oee.toFixed(2))
       }));
   }, [entries, chartMonth]);
 
@@ -186,53 +191,25 @@ export default function Dashboard() {
       return datePart >= reportFrom && datePart <= reportTo;
     });
 
-    let sumWork = 0;
-    let sumAvail = 0;
-    let sumProcess = 0;
-    let sumOk = 0;
-    let sumIdeal = 0;
-    let sumEffectiveRun = 0;
-    let sumStdMinutes = 0;
-    const seenBatchKeys = new Set();
-
-    dayEntries.forEach(e => {
-      sumProcess += (Number(e.processQty) || 0);
-      sumOk += (Number(e.okQty) || 0);
-      sumIdeal += (e.calculated?.idealProductionQty || 0);
-      sumStdMinutes += (Number(e.processQty) || 0) * (Number(e.standardTimePerPieceMin) || 0);
-
-      // Working Schedule/Available Working/Effective Run Time are BATCH-level
-      // (identical across every entry saved together from one submission) —
-      // count each batch only once, keyed by batchId (a standalone entry is
-      // its own one-entry batch). Mirrors server/utils/oeeAggregate.js.
-      const batchKey = e.batchId ? String(e.batchId) : `_solo:${e._id}`;
-      if (!seenBatchKeys.has(batchKey)) {
-        seenBatchKeys.add(batchKey);
-        sumWork += (e.calculated?.workingScheduleMin || 0);
-        sumAvail += (e.calculated?.availableWorkingMin || 0);
-        sumEffectiveRun += (e.calculated?.effectiveMcRunTimeMin || 0);
-      }
-    });
-
-    // Availability = Effective Run Time ÷ Available Working Time. Performance
-    // = Standard Minutes for Output ÷ Effective Run Time. Mirrors
-    // server/services/productionCalculation.service.js's computeBatchCalculations
-    // (corrected 2026-08-31).
-    const availRatio = sumAvail > 0 ? (sumEffectiveRun / sumAvail) * 100 : 0;
-    const qualRatio = sumProcess > 0 ? (sumOk / sumProcess) * 100 : 0;
-    const perfRatio = sumEffectiveRun > 0 ? (sumStdMinutes / sumEffectiveRun) * 100 : 0;
-    const oee = (availRatio / 100) * (perfRatio / 100) * (qualRatio / 100) * 100;
+    // Working Schedule/Available Working/Effective Run Time are per-row on
+    // `calculated` now (see server/services/productionCalculation.service.js's
+    // 2026-09-02 history note) — aggregateOee recomputes the true combined
+    // total per batch fresh so a shift split across several entries only
+    // contributes its schedule time once, and every ratio is derived from
+    // those combined totals rather than summed/averaged per entry. Mirrors
+    // server/utils/oeeAggregate.js.
+    const agg = aggregateOee(dayEntries);
 
     return {
-      workMin: sumWork.toFixed(2),
-      availMin: sumAvail.toFixed(2),
-      availRatio: availRatio.toFixed(2) + "%",
-      processQty: sumProcess,
-      okQty: sumOk,
-      qualRatio: qualRatio.toFixed(2) + "%",
-      idealQty: sumIdeal.toFixed(2),
-      perfRatio: perfRatio.toFixed(2) + "%",
-      oee: oee.toFixed(2) + "%"
+      workMin: agg.workMin.toFixed(2),
+      availMin: agg.availMin.toFixed(2),
+      availRatio: agg.availRatio.toFixed(2) + "%",
+      processQty: agg.processQty,
+      okQty: agg.okQty,
+      qualRatio: agg.qualRatio.toFixed(2) + "%",
+      idealQty: agg.idealQty.toFixed(2),
+      perfRatio: agg.perfRatio.toFixed(2) + "%",
+      oee: agg.oee.toFixed(2) + "%"
     };
   }, [entries, reportFrom, reportTo]);
 

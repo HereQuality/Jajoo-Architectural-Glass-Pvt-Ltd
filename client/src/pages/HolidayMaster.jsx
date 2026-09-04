@@ -1,19 +1,32 @@
 import React, { useState, useEffect, useContext } from "react";
-import { Pencil, Trash2, CalendarOff, Plus, X, Repeat } from "lucide-react";
+import { Pencil, Trash2, CalendarOff, CalendarDays, Plus, Repeat, Loader2 } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
 import DeleteModal from "../Components/Common/DeleteModal";
 import DatePicker from "../Components/Common/DatePicker";
 import { useInvalidateCompanyHolidays } from "../hooks/useCompanyHolidays";
+import { useCompanySettings, useInvalidateCompanySettings } from "../hooks/useCompanySettings";
 import {
   getCompanyHolidays,
   createCompanyHoliday,
   updateCompanyHoliday,
   deleteCompanyHoliday,
 } from "../api/companyHolidays.api";
+import { updateWeeklyOffDays } from "../api/companySettings.api";
 
 const NAME_MAX = 100;
+
+// Date#getDay() values: 0=Sun..6=Sat, listed Mon-first to match the page.
+const WEEK_DAYS = [
+  { label: "Mon", value: 1 },
+  { label: "Tue", value: 2 },
+  { label: "Wed", value: 3 },
+  { label: "Thu", value: 4 },
+  { label: "Fri", value: 5 },
+  { label: "Sat", value: 6 },
+  { label: "Sun", value: 0 },
+];
 
 const toDateStr = (v) => {
   if (!v) return "";
@@ -44,13 +57,77 @@ const validate = (v) => {
   return e;
 };
 
-// ── Add / Edit Modal ──────────────────────────────────────────────────────
-const HolidayModal = ({ mode, initialValues, onClose, onSaved }) => {
+// ── Weekly Off ────────────────────────────────────────────────────────────
+const WeeklyOffCard = ({ canEdit }) => {
   const toast = useAlert() || toastify;
-  const [v, setV] = useState(initialValues);
+  const { data: settings } = useCompanySettings();
+  const invalidateSettings = useInvalidateCompanySettings();
+  const [savingDay, setSavingDay] = useState(null);
+  const selected = settings?.weeklyOffDays ?? [2];
+
+  const toggleDay = async (day) => {
+    if (!canEdit || savingDay != null) return;
+    const next = selected.includes(day) ? selected.filter((d) => d !== day) : [...selected, day];
+    setSavingDay(day);
+    try {
+      await updateWeeklyOffDays(next);
+      invalidateSettings();
+    } catch (err) {
+      toast.error?.(err.response?.data?.message || "Failed to update weekly off");
+    } finally {
+      setSavingDay(null);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6 mb-5">
+      <div className="flex items-center gap-2 mb-1.5">
+        <CalendarDays className="w-[18px] h-[18px] text-brand-600" />
+        <h2 className="text-sm font-semibold text-slate-900">Weekly Off</h2>
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        Day(s) the company doesn't operate at all, every week — extends the Grinding Data Entry edit window the same way a holiday does.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {WEEK_DAYS.map((d) => {
+          const isActive = selected.includes(d.value);
+          const isSaving = savingDay === d.value;
+          return (
+            <button
+              key={d.value}
+              type="button"
+              disabled={!canEdit || savingDay != null}
+              onClick={() => toggleDay(d.value)}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed ${
+                isActive
+                  ? "bg-brand-600 border-brand-600 text-white"
+                  : "bg-white border-slate-300 text-slate-600 hover:bg-slate-50"
+              } ${savingDay != null && !isSaving ? "opacity-60" : ""}`}
+            >
+              {isSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {d.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ── Add / Edit Holiday (inline card, not a modal) ────────────────────────
+const AddHolidayCard = ({ editItem, onCancelEdit, onSaved, canEdit }) => {
+  const toast = useAlert() || toastify;
+  const isEditing = !!editItem;
+  const [v, setV] = useState(editItem || INIT);
   const [errs, setErrs] = useState({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setV(editItem || INIT);
+    setErrs({});
+    setSubmitted(false);
+  }, [editItem]);
 
   const set = (name, value) => setV((prev) => ({ ...prev, [name]: value }));
 
@@ -63,13 +140,18 @@ const HolidayModal = ({ mode, initialValues, onClose, onSaved }) => {
     setSaving(true);
     try {
       const payload = { name: v.name.trim(), date: v.date, isRecurringYearly: v.isRecurringYearly };
-      if (mode === "add") {
+      if (isEditing) {
+        await updateCompanyHoliday(editItem._id, payload);
+        toast.success?.("Holiday updated!");
+      } else {
         await createCompanyHoliday(payload);
         toast.success?.("Holiday added!");
-      } else {
-        await updateCompanyHoliday(initialValues._id, payload);
-        toast.success?.("Holiday updated!");
       }
+      // Save keeps the form ready for the next one — name, date, tab, Save,
+      // repeat — instead of closing a modal you'd have to reopen each time.
+      setV(INIT);
+      setErrs({});
+      setSubmitted(false);
       onSaved();
     } catch (err) {
       const msg = err.response?.data?.message || "Failed to save";
@@ -83,22 +165,25 @@ const HolidayModal = ({ mode, initialValues, onClose, onSaved }) => {
 
   const err = (name) => submitted && errs[name] ? <p className="text-xs text-red-500 mt-1">{errs[name]}</p> : null;
 
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-          <h2 className="text-base font-semibold text-slate-900">
-            {mode === "add" ? "Add Holiday" : "Edit Holiday"}
-          </h2>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+  if (!canEdit) return null;
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          {/* Name */}
-          <div>
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6 mb-5">
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-2">
+          <CalendarOff className="w-[18px] h-[18px] text-brand-600" />
+          <h2 className="text-sm font-semibold text-slate-900">{isEditing ? "Edit Holiday" : "Add Holiday"}</h2>
+        </div>
+        {isEditing && (
+          <button type="button" onClick={onCancelEdit} className="text-xs font-medium text-slate-500 hover:text-slate-700">
+            Cancel edit
+          </button>
+        )}
+      </div>
+
+      <form onSubmit={handleSubmit} className="mt-3">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="flex-1 min-w-[200px]">
             <label className="block text-sm font-medium text-slate-700 mb-1">
               Name <span className="text-red-500">*</span>
             </label>
@@ -117,8 +202,7 @@ const HolidayModal = ({ mode, initialValues, onClose, onSaved }) => {
             {err("name")}
           </div>
 
-          {/* Date */}
-          <div>
+          <div className="w-full sm:w-48">
             <label className="block text-sm font-medium text-slate-700 mb-1">
               Date <span className="text-red-500">*</span>
             </label>
@@ -126,8 +210,7 @@ const HolidayModal = ({ mode, initialValues, onClose, onSaved }) => {
             {err("date")}
           </div>
 
-          {/* Repeats every year */}
-          <div className="flex items-center gap-2 pt-1">
+          <div className="flex items-center gap-2 pb-2.5">
             <input
               type="checkbox"
               id="holiday_recurring"
@@ -135,28 +218,27 @@ const HolidayModal = ({ mode, initialValues, onClose, onSaved }) => {
               onChange={(e) => set("isRecurringYearly", e.target.checked)}
               className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
             />
-            <label htmlFor="holiday_recurring" className="text-sm text-slate-700 select-none cursor-pointer">
+            <label htmlFor="holiday_recurring" className="text-sm text-slate-700 select-none cursor-pointer whitespace-nowrap">
               Repeats every year
             </label>
           </div>
-          <p className="text-xs text-slate-400 -mt-3">
-            {v.isRecurringYearly
-              ? "Falls on the same date every year (e.g. a national holiday)."
-              : "Untick for a one-off day (e.g. a specific plant shutdown)."}
-          </p>
 
-          <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
-            <button type="button" onClick={onClose} disabled={saving}
-              className="rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium px-4 py-2.5 disabled:opacity-60">
-              Cancel
-            </button>
-            <button type="submit" disabled={saving}
-              className="inline-flex items-center gap-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-4 py-2.5 shadow-sm disabled:opacity-70">
-              {saving ? "Saving…" : mode === "add" ? "Add" : "Save Changes"}
-            </button>
-          </div>
-        </form>
-      </div>
+          <button
+            type="submit"
+            disabled={saving}
+            className="inline-flex items-center gap-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-5 py-2.5 shadow-sm disabled:opacity-70 whitespace-nowrap"
+          >
+            <Plus className="w-4 h-4" />
+            {saving ? "Saving…" : isEditing ? "Update" : "Save"}
+          </button>
+        </div>
+      </form>
+
+      {!isEditing && (
+        <p className="text-xs text-slate-400 mt-3">
+          Save keeps this ready for the next one — name, date, tab, Save, repeat.
+        </p>
+      )}
     </div>
   );
 };
@@ -164,7 +246,7 @@ const HolidayModal = ({ mode, initialValues, onClose, onSaved }) => {
 // ── Main Page ─────────────────────────────────────────────────────────────
 const HolidayMaster = () => {
   const toast = useAlert() || toastify;
-  const { currentPagePermissions = { read: true, write: true, edit: true, delete: true } } =
+  const { currentPagePermissions = { read: true, create: true, edit: true, delete: true } } =
     useContext(MenuContext) || {};
   const invalidateHolidays = useInvalidateCompanyHolidays();
 
@@ -172,7 +254,6 @@ const HolidayMaster = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isDeleteLoading, setIsDeleteLoading] = useState(false);
 
-  const [showAdd, setShowAdd] = useState(false);
   const [editItem, setEditItem] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
 
@@ -199,92 +280,89 @@ const HolidayMaster = () => {
       .finally(() => setIsDeleteLoading(false));
   };
 
+  const canEdit = !!currentPagePermissions.create;
+
   return (
-    <div className="p-4 sm:p-6">
+    <div className="p-4 sm:p-6 max-w-5xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between mb-2 flex-wrap gap-3">
-        <div className="flex items-center gap-2">
-          <CalendarOff className="w-5 h-5 text-brand-600" />
-          <h1 className="text-lg font-semibold text-slate-900">Holiday Master</h1>
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6 mb-5">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-brand-600 flex items-center justify-center flex-shrink-0">
+            <CalendarOff className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold text-slate-900">Company Holidays</h1>
+            <p className="text-sm text-slate-500">
+              Weekly off + specific dates — the Grinding Data Entry edit window automatically extends around these.
+            </p>
+          </div>
         </div>
-        {currentPagePermissions.create && (
-          <button
-            onClick={() => setShowAdd(true)}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-4 py-2.5 shadow-sm transition-colors"
-          >
-            <Plus className="w-4 h-4" /> Add Holiday
-          </button>
-        )}
       </div>
 
-      <p className="text-sm text-slate-500 mb-5">
-        Days added here extend the Grinding Data Entry edit window by one more day, the same way the weekly Tuesday off-day already does — an entry never locks out just because a holiday fell inside its 2-working-day window.
-      </p>
+      <WeeklyOffCard canEdit={canEdit} />
 
-      {/* Table */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-slate-50 text-slate-600 text-left">
-              <th className="px-4 py-3 font-medium whitespace-nowrap">Name</th>
-              <th className="px-4 py-3 font-medium whitespace-nowrap">Date</th>
-              <th className="px-4 py-3 font-medium whitespace-nowrap">Type</th>
-              <th className="px-4 py-3 font-medium text-right whitespace-nowrap">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {holidays.length === 0 && (
-              <tr>
-                <td colSpan={4} className="px-4 py-10 text-center text-slate-400">
-                  {isLoading ? "Loading…" : "No holidays configured yet. Click 'Add Holiday' to create one."}
-                </td>
-              </tr>
-            )}
-            {holidays.map((h) => (
-              <tr key={h._id} className="border-t border-slate-100 hover:bg-slate-50/50 transition-colors">
-                <td className="px-4 py-3 font-medium text-slate-800">{h.name}</td>
-                <td className="px-4 py-3 text-slate-600">{formatHolidayDate(h.date, h.isRecurringYearly)}</td>
-                <td className="px-4 py-3">
-                  {h.isRecurringYearly ? (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-violet-50 text-violet-700">
-                      <Repeat className="w-3 h-3" /> Every year
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-500">
-                      One-off
-                    </span>
-                  )}
-                </td>
-                <td className="px-4 py-3">
-                  <div className="flex justify-end gap-2">
-                    {currentPagePermissions.edit && (
-                      <button onClick={() => openEdit(h)}
-                        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors" title="Edit">
-                        <Pencil className="w-4 h-4" />
-                      </button>
-                    )}
-                    {currentPagePermissions.delete && (
-                      <button onClick={() => setDeleteId(h._id)}
-                        className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 transition-colors" title="Delete">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <AddHolidayCard
+        editItem={editItem}
+        canEdit={canEdit}
+        onCancelEdit={() => setEditItem(null)}
+        onSaved={() => { setEditItem(null); fetchHolidays(); invalidateHolidays(); }}
+      />
 
-      {showAdd && (
-        <HolidayModal mode="add" initialValues={INIT}
-          onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); fetchHolidays(); invalidateHolidays(); }} />
+      {/* List */}
+      {holidays.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-10 text-center text-slate-400 text-sm">
+          {isLoading ? "Loading…" : "No holidays configured yet. Add one above."}
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 text-slate-600 text-left">
+                <th className="px-4 py-3 font-medium whitespace-nowrap">Name</th>
+                <th className="px-4 py-3 font-medium whitespace-nowrap">Date</th>
+                <th className="px-4 py-3 font-medium whitespace-nowrap">Type</th>
+                <th className="px-4 py-3 font-medium text-right whitespace-nowrap">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {holidays.map((h) => (
+                <tr key={h._id} className="border-t border-slate-100 hover:bg-slate-50/50 transition-colors">
+                  <td className="px-4 py-3 font-medium text-slate-800">{h.name}</td>
+                  <td className="px-4 py-3 text-slate-600">{formatHolidayDate(h.date, h.isRecurringYearly)}</td>
+                  <td className="px-4 py-3">
+                    {h.isRecurringYearly ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-violet-50 text-violet-700">
+                        <Repeat className="w-3 h-3" /> Every year
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-500">
+                        One-off
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex justify-end gap-2">
+                      {currentPagePermissions.edit && (
+                        <button onClick={() => openEdit(h)}
+                          className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 transition-colors" title="Edit">
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                      )}
+                      {currentPagePermissions.delete && (
+                        <button onClick={() => setDeleteId(h._id)}
+                          className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 transition-colors" title="Delete">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
-      {editItem && (
-        <HolidayModal mode="edit" initialValues={editItem}
-          onClose={() => setEditItem(null)} onSaved={() => { setEditItem(null); fetchHolidays(); invalidateHolidays(); }} />
-      )}
+
       <DeleteModal show={!!deleteId} toggle={() => setDeleteId(null)}
         handleDelete={handleDelete} disabled={isDeleteLoading} />
     </div>

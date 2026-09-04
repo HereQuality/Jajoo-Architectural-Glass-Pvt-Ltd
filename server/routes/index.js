@@ -40,6 +40,7 @@ const operatorRoutes = require("./operator.routes");
 const standardTimeRoutes = require("./standardTime.routes");
 const reportRoutes = require("./report.routes");
 const companyHolidayRoutes = require("./companyHoliday.routes");
+const companySettingsRoutes = require("./companySettings.routes");
 // const inventoryRoutes = require("./inventory.routes");
 
 // ── Mount routes ─────────────────────────────────────────────────────────────
@@ -61,6 +62,7 @@ router.use("/operators", operatorRoutes);
 router.use("/standard-times", standardTimeRoutes);
 router.use("/reports", reportRoutes);
 router.use("/company-holidays", companyHolidayRoutes);
+router.use("/company-settings", companySettingsRoutes);
 // router.use("/inventory", inventoryRoutes);
 
 // ── API Info endpoint ─────────────────────────────────────────────────────────

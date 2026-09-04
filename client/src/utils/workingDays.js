@@ -4,11 +4,12 @@
  * actually enforces the 2-working-day edit window; this one must never be
  * trusted as the source of truth.
  *
- * Working week: Mon/Wed/Thu/Fri/Sat/Sun — Tuesday (day 2) is off. Company
- * holidays are skipped the same way Tuesday is — see buildHolidaySet.
+ * Working week excludes whatever day(s) are configured as "weekly off"
+ * (Tuesday by default — see useCompanySettings / Holiday Master). Company
+ * holidays are skipped the same way — see buildHolidaySet.
  */
 
-const OFF_DAY = 2; // Date#getDay(): 0=Sun..6=Sat, 2=Tuesday
+export const DEFAULT_WEEKLY_OFF_DAYS = [2]; // Date#getDay(): 0=Sun..6=Sat — Tuesday, used if settings haven't loaded yet
 
 function dateKey(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -37,12 +38,16 @@ function isHoliday(date, holidaySet) {
   return holidaySet.exact.has(dateKey(date)) || holidaySet.recurring.has(monthDayKey(date));
 }
 
-export function isWorkingDay(date, holidaySet) {
-  return date.getDay() !== OFF_DAY && !isHoliday(date, holidaySet);
+export function isWorkingDay(date, holidaySet, weeklyOffDays) {
+  // Only fall back to the Tuesday default when the setting hasn't loaded at
+  // all (null/undefined) — an explicit empty array is a valid "no weekly
+  // off day" configuration and must not be silently overridden.
+  const offDays = weeklyOffDays == null ? DEFAULT_WEEKLY_OFF_DAYS : weeklyOffDays;
+  return !offDays.includes(date.getDay()) && !isHoliday(date, holidaySet);
 }
 
-// Counts working (non-Tuesday, non-holiday) calendar days strictly after `entryDate`, up to and including `now`.
-export function workingDaysElapsed(entryDate, now, holidaySet) {
+// Counts working (non-weekly-off, non-holiday) calendar days strictly after `entryDate`, up to and including `now`.
+export function workingDaysElapsed(entryDate, now, holidaySet, weeklyOffDays) {
   const cursor = new Date(entryDate);
   cursor.setHours(0, 0, 0, 0);
   const end = new Date(now);
@@ -51,13 +56,13 @@ export function workingDaysElapsed(entryDate, now, holidaySet) {
   let count = 0;
   while (cursor < end) {
     cursor.setDate(cursor.getDate() + 1);
-    if (isWorkingDay(cursor, holidaySet)) count++;
+    if (isWorkingDay(cursor, holidaySet, weeklyOffDays)) count++;
   }
   return count;
 }
 
-export function isEntryEditable(entryDate, now = new Date(), maxWorkingDays = 2, holidaySet) {
-  return workingDaysElapsed(entryDate, now, holidaySet) <= maxWorkingDays;
+export function isEntryEditable(entryDate, now = new Date(), maxWorkingDays = 2, holidaySet, weeklyOffDays) {
+  return workingDaysElapsed(entryDate, now, holidaySet, weeklyOffDays) <= maxWorkingDays;
 }
 
 // Parses a "YYYY-MM-DD" (or ISO datetime) string into a local Date, avoiding

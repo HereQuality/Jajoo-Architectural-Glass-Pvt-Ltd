@@ -90,6 +90,12 @@ export const ENDPOINTS = {
         BY_ID: (id) => `${V1}/company-holidays/${id}`,
     },
 
+    // Company-wide production scheduling settings (currently: weekly off days)
+    COMPANY_SETTINGS: {
+        BASE: `${V1}/company-settings`,
+        WEEKLY_OFF: `${V1}/company-settings/weekly-off`,
+    },
+
     // Employee endpoints
     EMPLOYEES: {
         BASE: `${V1}/employees`,

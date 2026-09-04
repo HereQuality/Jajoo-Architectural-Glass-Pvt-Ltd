@@ -24,13 +24,15 @@ function validateMachineTimes(body) {
   else if (!timeRx.test(body.machineOnTime)) errors.machineOnTime = "Machine Start Time must be HH:mm";
   if (!body.machineOffTime) errors.machineOffTime = "Shift Time End is required";
   else if (!timeRx.test(body.machineOffTime)) errors.machineOffTime = "Machine End Time must be HH:mm";
+  // Lunch Break is optional — only validated when actually provided.
+  if (body.lunchStartTime && !timeRx.test(body.lunchStartTime)) errors.lunchStartTime = "Lunch Start Time must be HH:mm";
   return errors;
 }
 
 // Create Machine
 exports.createMachine = async (req, res) => {
   try {
-    const { machineName, machineCode, description, processes, machineOnTime, machineOffTime, isActive } = req.body;
+    const { machineName, machineCode, description, processes, machineOnTime, machineOffTime, lunchStartTime, isActive } = req.body;
 
     if (!machineName || !machineName.trim()) {
       return res.status(400).json({ isOk: false, message: "Machine name is required" });
@@ -48,6 +50,7 @@ exports.createMachine = async (req, res) => {
       processes: Array.isArray(processes) ? processes : [],
       machineOnTime: machineOnTime || undefined,
       machineOffTime: machineOffTime || undefined,
+      lunchStartTime: lunchStartTime || undefined,
       isActive,
     });
 
@@ -72,10 +75,22 @@ exports.updateMachine = async (req, res) => {
       return res.status(400).json({ isOk: false, errors: timeErrors, message: "Please fix the highlighted fields" });
     }
 
-    const machine = await Machine.findOneAndUpdate({ _id: machineId }, req.body, {
-      new: true,
-      runValidators: true,
-    });
+    // Lunch Break is optional — clearing it back to "no lunch" sends "",
+    // which would fail the schema's HH:mm match validator if $set directly
+    // (unlike machineOnTime/machineOffTime, which are required and can
+    // never be blank). Unset it instead so clearing actually removes it.
+    const update = { ...req.body };
+    let unset;
+    if (update.lunchStartTime === "") {
+      delete update.lunchStartTime;
+      unset = { lunchStartTime: "" };
+    }
+
+    const machine = await Machine.findOneAndUpdate(
+      { _id: machineId },
+      unset ? { $set: update, $unset: unset } : update,
+      { new: true, runValidators: true },
+    );
 
     if (!machine) {
       return res.status(404).json({ isOk: false, message: "Machine not found" });

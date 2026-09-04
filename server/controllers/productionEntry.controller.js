@@ -1,6 +1,6 @@
 const ProductionEntry = require("../models/ProductionEntry");
 const Machine = require("../models/Machine");
-const { computeBatchCalculations, computeRowIdealProductionQty } = require("../services/productionCalculation.service");
+const { computeRowCalculations, computeBatchRowCalculations, computeBatchPositions, rowWorkingScheduleBounds, rowOwnSpan } = require("../services/productionCalculation.service");
 const { resolveMachineFilter } = require("../utils/entryQuery");
 const { aggregateEfficiencyByGroup } = require("../utils/efficiencyAggregate");
 const { buildGrindingEfficiencyPdf } = require("../services/report.service");
@@ -104,7 +104,56 @@ async function validatePayload(body) {
     errors.othersRemark = "Remark cannot exceed 300 characters";
   }
 
+  validateAdditionalPeriods(body, errors);
+
   return errors;
+}
+
+// Extra M/C ON/OFF periods for the SAME row (see the model file and
+// productionCalculation.service.js's 2026-09-06 note) — each must be a
+// valid HH:mm pair with Off after Start, and none of a row's own periods
+// (primary + additional) may overlap each other.
+const ADDITIONAL_PERIODS_LIMIT = 8;
+function validateAdditionalPeriods(body, errors) {
+  const raw = body.additionalPeriods;
+  if (raw === undefined || raw === null || raw === "") return;
+  if (!Array.isArray(raw)) {
+    errors.additionalPeriods = "Additional periods must be a list";
+    return;
+  }
+  if (raw.length > ADDITIONAL_PERIODS_LIMIT) {
+    errors.additionalPeriods = `No more than ${ADDITIONAL_PERIODS_LIMIT} additional periods allowed`;
+    return;
+  }
+  const timeRx = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  const periods = [];
+  if (body.mcStartTime && body.mcOffTime && timeRx.test(body.mcStartTime) && timeRx.test(body.mcOffTime)) {
+    periods.push([body.mcStartTime, body.mcOffTime]);
+  }
+  for (let i = 0; i < raw.length; i++) {
+    const start = raw[i] && raw[i].startTime;
+    const end = raw[i] && raw[i].endTime;
+    const label = `Additional period ${i + 1}`;
+    if (!start || !timeRx.test(start)) { errors.additionalPeriods = `${label} Start Time must be HH:mm`; return; }
+    if (!end || !timeRx.test(end)) { errors.additionalPeriods = `${label} Off Time must be HH:mm`; return; }
+    if (end <= start) { errors.additionalPeriods = `${label} Off Time must be after its Start Time`; return; }
+    for (const [pStart, pEnd] of periods) {
+      if (timeWindowsOverlap(start, end, pStart, pEnd)) {
+        errors.additionalPeriods = `${label} (${start}–${end}) overlaps with another period on this same row`;
+        return;
+      }
+    }
+    periods.push([start, end]);
+  }
+}
+
+// Filters/normalizes `additionalPeriods` from a request body down to the
+// shape stored on the model — drops any incomplete item.
+function sanitizeAdditionalPeriods(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((p) => p && p.startTime && p.endTime)
+    .map((p) => ({ startTime: p.startTime, endTime: p.endTime }));
 }
 
 function buildData(body) {
@@ -114,8 +163,10 @@ function buildData(body) {
     date: body.date || Date.now(),
     mcStartTime: body.mcStartTime,
     mcOffTime: body.mcOffTime,
+    additionalPeriods: sanitizeAdditionalPeriods(body.additionalPeriods),
     shiftOnTime: body.shiftOnTime || undefined,
     shiftOffTime: body.shiftOffTime || undefined,
+    lunchStartTime: body.lunchStartTime || undefined,
     batchId: body.batchId || undefined,
     othersRemark: typeof body.othersRemark === "string" ? body.othersRemark.trim().slice(0, 300) : "",
   };
@@ -175,18 +226,23 @@ async function checkMachineTimeOverlap(body, excludeId) {
   const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
   const query = { machine: body.machine, date: { $gte: startOfDay, $lt: endOfDay } };
   if (excludeId) query._id = { $ne: excludeId };
-  const candidates = await ProductionEntry.find(query).select("mcStartTime mcOffTime").lean();
+  const candidates = await ProductionEntry.find(query).select("mcStartTime mcOffTime additionalPeriods").lean();
+  const newPeriods = [
+    [body.mcStartTime, body.mcOffTime],
+    ...sanitizeAdditionalPeriods(body.additionalPeriods).map((p) => [p.startTime, p.endTime]),
+  ];
   for (const c of candidates) {
-    if (timeWindowsOverlap(body.mcStartTime, body.mcOffTime, c.mcStartTime, c.mcOffTime)) {
-      return `This M/C time (${body.mcStartTime}–${body.mcOffTime}) overlaps with another entry already saved for ` +
-        `this machine on this date (${c.mcStartTime}–${c.mcOffTime}) — the same machine can't run two jobs at once.`;
+    const cPeriods = [[c.mcStartTime, c.mcOffTime], ...(c.additionalPeriods || []).map((p) => [p.startTime, p.endTime])];
+    for (const [nStart, nEnd] of newPeriods) {
+      for (const [cStart, cEnd] of cPeriods) {
+        if (timeWindowsOverlap(nStart, nEnd, cStart, cEnd)) {
+          return `This M/C time (${nStart}–${nEnd}) overlaps with another entry already saved for ` +
+            `this machine on this date (${cStart}–${cEnd}) — the same machine can't run two jobs at once.`;
+        }
+      }
     }
   }
   return null;
-}
-
-function round2(n) {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
 // Resolves Shift On/Off Time: prefer the entry's own snapshot (taken from
@@ -205,55 +261,43 @@ async function resolveShiftTimes(data) {
   return { shiftOnTime, shiftOffTime };
 }
 
-// Working Schedule Time / Total Stoppage / Available Working Time /
-// Effective M/C Run Time / Availability / Performance / Quality / OEE % are
-// BATCH-level — shared identically across every entry saved together from
-// one "Add Entry" submission (see computeBatchCalculations). So saving,
-// editing, or deleting ANY row in a batch changes the numbers for every
-// OTHER row in it too — this recomputes the batch from `rows` and writes
-// the refreshed numbers onto every row in `rows` that already exists in the
-// DB (i.e. has an `_id`); a row without one yet (the entry currently being
-// created) just gets `calculated`/`overtimeMin` set on the object in memory
-// for the caller to save itself.
-async function recomputeBatchAndSave(rows, shiftOnTime, shiftOffTime) {
-  const batchCalc = computeBatchCalculations(rows, shiftOnTime, shiftOffTime);
-  for (const row of rows) {
-    const idealProductionQty = round2(computeRowIdealProductionQty(row));
-    const calculated = { ...batchCalc, idealProductionQty };
-    if (row._id) {
-      await ProductionEntry.updateOne({ _id: row._id }, { calculated, overtimeMin: batchCalc.overtimeMin });
-    }
-    row.calculated = calculated;
-    row.overtimeMin = batchCalc.overtimeMin;
-  }
-  return batchCalc;
+// Computes and applies a PROVISIONAL `calculated`/`overtimeMin` for `data`
+// (the entry currently being created/updated), as if it were a standalone
+// entry (isFirst=isLast=true default). Used only to run the capacity check
+// before insert/update — Ideal Production Qty (what capacityError checks)
+// doesn't depend on batch position, so this provisional value is fine for
+// that gate. The real, position-aware `calculated` gets written afterward
+// by recomputeBatch, once the row's siblings (if any) are known.
+async function applyShiftCalculations(data) {
+  const { shiftOnTime, shiftOffTime } = await resolveShiftTimes(data);
+  const calculated = computeRowCalculations(data, shiftOnTime, shiftOffTime);
+  data.calculated = calculated;
+  data.overtimeMin = calculated.overtimeMin;
+  return calculated;
 }
 
-// Recomputes and saves every entry still in the DB for `batchId` (used
-// after removing a row from a batch, or moving one out of it — the
-// remaining siblings' batch-level numbers must drop that row's
-// contribution). No-op when nobody's left in that batch.
-async function recomputeExistingBatch(batchId, excludeEntryId) {
-  if (!batchId) return;
-  const query = { batchId };
-  if (excludeEntryId) query._id = { $ne: excludeEntryId };
-  const siblings = await ProductionEntry.find(query).lean();
+// Recomputes and saves `calculated`/`overtimeMin` for every row matched by
+// `query`, position-aware within that group (see computeBatchRowCalculations
+// in productionCalculation.service.js's 2026-09-03 note) — a row's own
+// Working Schedule Time (and Overtime/Start Delay/Early Closed) now depends
+// on whether it's the first/last chronological entry among its siblings,
+// not just its own fields, so creating, editing, or deleting one row in a
+// batch must recompute the whole batch, not just that one row.
+async function recomputeBatch(query) {
+  const siblings = await ProductionEntry.find(query);
   if (siblings.length === 0) return;
   const { shiftOnTime, shiftOffTime } = await resolveShiftTimes(siblings[0]);
-  await recomputeBatchAndSave(siblings, shiftOnTime, shiftOffTime);
+  const results = computeBatchRowCalculations(siblings, shiftOnTime, shiftOffTime);
+  await Promise.all(results.map(({ row, calculated }) => {
+    row.calculated = calculated;
+    row.overtimeMin = calculated.overtimeMin;
+    return row.save();
+  }));
 }
 
-// Computes and applies batch-level `calculated`/`overtimeMin` for `data`
-// (the entry currently being created/updated), together with every OTHER
-// entry already saved under the same batchId — those siblings get their
-// stored `calculated` refreshed too, since adding/editing this row changes
-// the batch's totals for all of them.
-async function applyShiftCalculations(data, excludeEntryId) {
-  const { shiftOnTime, shiftOffTime } = await resolveShiftTimes(data);
-  const query = data.batchId ? { batchId: data.batchId } : null;
-  if (query && excludeEntryId) query._id = { $ne: excludeEntryId };
-  const siblings = query ? await ProductionEntry.find(query).lean() : [];
-  await recomputeBatchAndSave([...siblings, data], shiftOnTime, shiftOffTime);
+// A standalone entry (no batchId) is its own batch of one.
+function batchQueryFor(entry) {
+  return entry.batchId ? { batchId: entry.batchId } : { _id: entry._id };
 }
 
 exports.createProductionEntry = async (req, res) => {
@@ -278,7 +322,15 @@ exports.createProductionEntry = async (req, res) => {
       data.createdByModel = req.user.roleType === "SuperAdmin" ? "User" : "Employee";
     }
     const entry = await ProductionEntry.create(data);
-    const populated = await entry.populate([
+
+    // The new row may join an existing batch (or already have siblings from
+    // earlier saves in the same multi-row submission) — recompute the whole
+    // batch so every row's Working Schedule Time/Overtime/Start Delay/Early
+    // Closed reflects the correct first/last position now that this row
+    // exists (see recomputeBatch's comment above).
+    await recomputeBatch(batchQueryFor(entry));
+
+    const populated = await ProductionEntry.findById(entry._id).populate([
       { path: "machine", select: "machineName machineCode machineOnTime machineOffTime" },
       { path: "operator", select: "name" },
     ]);
@@ -301,11 +353,12 @@ exports.updateProductionEntry = async (req, res) => {
     // happens to have a pre-existing overlap from before this check existed
     // would permanently block that edit for a conflict the user isn't
     // touching.
-    const existingEntry = await ProductionEntry.findById(entryId).select("mcStartTime mcOffTime machine date batchId").lean();
+    const existingEntry = await ProductionEntry.findById(entryId).select("mcStartTime mcOffTime additionalPeriods machine date batchId").lean();
     if (!existingEntry) return res.status(404).json({ isOk: false, message: "Entry not found" });
     const timeRelevantFieldsChanged =
       existingEntry.mcStartTime !== req.body.mcStartTime ||
       existingEntry.mcOffTime !== req.body.mcOffTime ||
+      JSON.stringify(existingEntry.additionalPeriods || []) !== JSON.stringify(sanitizeAdditionalPeriods(req.body.additionalPeriods)) ||
       String(existingEntry.machine) !== String(req.body.machine) ||
       new Date(existingEntry.date).toDateString() !== new Date(req.body.date).toDateString();
     if (timeRelevantFieldsChanged) {
@@ -316,24 +369,30 @@ exports.updateProductionEntry = async (req, res) => {
     }
 
     const data = buildData(req.body);
-    await applyShiftCalculations(data, entryId);
+    await applyShiftCalculations(data);
     const capacityMsg = capacityError(data);
     if (capacityMsg) {
       return res.status(400).json({ isOk: false, errors: { processQty: capacityMsg }, message: capacityMsg });
     }
 
-    const entry = await ProductionEntry.findOneAndUpdate({ _id: entryId }, data, {
+    let entry = await ProductionEntry.findOneAndUpdate({ _id: entryId }, data, {
       new: true, runValidators: true,
-    }).populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name");
+    });
 
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
 
-    // If this row moved out of (or into a different) batch, its OLD
-    // batch's remaining siblings still need their batch-level numbers
-    // recomputed without this row's contribution.
-    if (existingEntry.batchId && String(existingEntry.batchId) !== String(data.batchId || "")) {
-      await recomputeExistingBatch(existingEntry.batchId, entryId);
+    // Recompute this row's (possibly new) batch — its own time/batchId may
+    // have changed, which can change who's first/last among its siblings.
+    await recomputeBatch(batchQueryFor(entry));
+    // If it moved OUT of its old batch, that batch's remaining members may
+    // also have a new first/last row now that this one has left.
+    if (existingEntry.batchId && String(existingEntry.batchId) !== String(entry.batchId || "")) {
+      await recomputeBatch({ batchId: existingEntry.batchId });
     }
+
+    entry = await ProductionEntry.findById(entryId)
+      .populate("machine", "machineName machineCode machineOnTime machineOffTime")
+      .populate("operator", "name");
 
     res.status(200).json({ isOk: true, data: entry, message: "Entry updated successfully" });
   } catch (err) {
@@ -347,10 +406,10 @@ exports.deleteProductionEntry = async (req, res) => {
     const entry = await ProductionEntry.findByIdAndDelete(req.params.entryId);
     if (!entry) return res.status(404).json({ isOk: false, message: "Entry not found" });
 
-    // Removing this row changes the batch's totals for whoever's left in it.
-    if (entry.batchId) {
-      await recomputeExistingBatch(entry.batchId, entry._id);
-    }
+    // The deleted row may have been the first or last in its batch — the
+    // remaining siblings need recomputing so a new row correctly becomes
+    // first/last in its place.
+    if (entry.batchId) await recomputeBatch({ batchId: entry.batchId });
 
     res.status(200).json({ isOk: true, message: "Entry deleted successfully" });
   } catch (err) {
@@ -516,24 +575,26 @@ exports.getShiftTimeReport = async (req, res) => {
       .sort({ date: -1, mcStartTime: -1 })
       .lean();
 
-    // Effective Shift Start/End — the same min/max envelope rule used
-    // everywhere else (Machine Master's Shift Time column, Working Schedule
-    // Time): earlier of Shift On/M-C Start, later of Shift Off/M-C Off.
-    // "HH:mm" strings compare correctly with plain string min/max since
-    // they're always zero-padded to the same width. Prefers the entry's own
-    // shiftOnTime/shiftOffTime SNAPSHOT (what it actually ran under —
-    // doesn't drift if the machine's Shift Time is edited later); falls
-    // back to the machine's current config only for entries saved before
-    // snapshotting existed.
+    // Effective Shift Start/End — mirrors rowWorkingScheduleBounds, the same
+    // position-aware rule Working Schedule Time itself uses (see
+    // productionCalculation.service.js's 2026-09-03 note): only the
+    // chronologically first row in a batch can extend backward past Shift
+    // On, only the last can extend forward past Shift Off — a middle row
+    // shows exactly its own M/C Start/Off. computeBatchPositions groups
+    // these same `entries` by batchId to know which is which. Prefers the
+    // entry's own shiftOnTime/shiftOffTime SNAPSHOT (what it actually ran
+    // under — doesn't drift if the machine's Shift Time is edited later);
+    // falls back to the machine's current config only for entries saved
+    // before snapshotting existed.
+    const positions = computeBatchPositions(entries);
     const rows = entries.map((e) => {
       const shiftOnTime = e.shiftOnTime || e.machine?.machineOnTime || null;
       const shiftOffTime = e.shiftOffTime || e.machine?.machineOffTime || null;
-      const effectiveStartTime = shiftOnTime
-        ? (e.mcStartTime < shiftOnTime ? e.mcStartTime : shiftOnTime)
-        : e.mcStartTime;
-      const effectiveEndTime = shiftOffTime
-        ? (e.mcOffTime > shiftOffTime ? e.mcOffTime : shiftOffTime)
-        : e.mcOffTime;
+      const { isFirst, isLast } = positions.get(String(e._id));
+      const ownSpan = rowOwnSpan(e);
+      const { start: effectiveStartTime, end: effectiveEndTime } = rowWorkingScheduleBounds(
+        shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast,
+      );
 
       return {
         _id: e._id,

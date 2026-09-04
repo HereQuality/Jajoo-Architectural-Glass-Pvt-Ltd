@@ -61,6 +61,11 @@ const EMPLOYEE_MANAGEMENT_MENUS = [
   { menuName: "Skills", menuUrl: "/hqepl/skills", sequence: 4, icon: "Sparkles" },
   { menuName: "Employee", menuUrl: "/hqepl/employee-management/employee", sequence: 5, icon: "User" },
   { menuName: "Manage Role", menuUrl: "/hqepl/employee-management/manage-role", sequence: 6, icon: "UserCog" },
+  // Moved here from Setup at the user's request — same menuUrl/permission
+  // scope (/production/holidays), just re-parented under a different
+  // group so existing role permissions (keyed by this menu's _id, not its
+  // group) keep working unchanged.
+  { menuName: "Holiday Master", menuUrl: "/hqepl/production/holidays", sequence: 7, icon: "CalendarOff" },
 ];
 
 const SETUP_MENUS = [
@@ -68,7 +73,6 @@ const SETUP_MENUS = [
   { menuName: "Machine Master", menuUrl: "/hqepl/production/machines", sequence: 2, icon: "Factory" },
   { menuName: "Operator Master", menuUrl: "/hqepl/production/operators", sequence: 3, icon: "UserCog" },
   { menuName: "Standard Time Master", menuUrl: "/hqepl/production/standard-time", sequence: 4, icon: "Timer" },
-  { menuName: "Holiday Master", menuUrl: "/hqepl/production/holidays", sequence: 5, icon: "CalendarOff" },
 ];
 
 const DATA_ENTRY_MENUS = [

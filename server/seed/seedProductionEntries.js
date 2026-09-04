@@ -45,17 +45,13 @@ const Operator = require("../models/Operator");
 const Process = require("../models/Process");
 const StandardTime = require("../models/StandardTime");
 const ProductionEntry = require("../models/ProductionEntry");
-const { computeBatchCalculations, computeRowIdealProductionQty } = require("../services/productionCalculation.service");
+const { computeRowCalculations } = require("../services/productionCalculation.service");
 
-// This seed script only ever generates standalone (non-batched) entries, so
-// each one is simply a batch of one — see productionCalculation.service.js
-// for why Working Schedule/Total Stoppage/Available Working/Effective Run
-// Time are computed at the batch level.
+// This seed script only ever generates standalone (non-batched) entries —
+// computeRowCalculations already handles the single-entry case (see
+// productionCalculation.service.js).
 function computeCalculations(entry) {
-  return {
-    ...computeBatchCalculations([entry], entry.shiftOnTime, entry.shiftOffTime),
-    idealProductionQty: round2(computeRowIdealProductionQty(entry)),
-  };
+  return computeRowCalculations(entry, entry.shiftOnTime, entry.shiftOffTime);
 }
 
 const SEED_TAG = "[seed-data]";
@@ -74,7 +70,6 @@ function mulberry32(seed) {
 const rand = mulberry32(20260811);
 const pick = (arr) => arr[Math.floor(rand() * arr.length)];
 const int = (min, max) => Math.floor(min + rand() * (max - min + 1));
-const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 // 2-3 realistic size/thickness/time combos per machine — real industrial
 // glass panel sizes (mm) and sane grinding times (minutes/piece), not the

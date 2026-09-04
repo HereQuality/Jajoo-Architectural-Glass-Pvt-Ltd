@@ -30,8 +30,24 @@ const initialState = {
   processes: [],
   machineOnTime: "",
   machineOffTime: "",
+  lunchStartTime: "",
   isActive: true,
 };
+
+// Every 1-hour Lunch Break slot (00:00–01:00 through 23:00–00:00), value is
+// the HH:mm start time stored on the machine — the window is always exactly
+// 1 hour (see productionCalculation.service.js's computeLunchMin).
+const LUNCH_OPTIONS = Array.from({ length: 24 }, (_, h) => {
+  const fmt12 = (hour) => {
+    const period = hour < 12 ? "AM" : "PM";
+    const h12 = hour % 12 === 0 ? 12 : hour % 12;
+    return `${h12}:00 ${period}`;
+  };
+  return {
+    value: `${String(h).padStart(2, "0")}:00`,
+    label: `${fmt12(h)} – ${fmt12((h + 1) % 24)}`,
+  };
+});
 
 const validate = (values) => {
   const errors = {};
@@ -62,6 +78,11 @@ const validate = (values) => {
     errors.machineOffTime = "Shift Time End is required";
   } else if (!TIME_RX.test(values.machineOffTime)) {
     errors.machineOffTime = "Use HH:mm format";
+  }
+
+  // Lunch Break is optional — only validated when actually selected.
+  if (values.lunchStartTime && !TIME_RX.test(values.lunchStartTime)) {
+    errors.lunchStartTime = "Use HH:mm format";
   }
 
   return errors;
@@ -108,6 +129,7 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
           processes: values.processes || [],
           machineOnTime: values.machineOnTime || "",
           machineOffTime: values.machineOffTime || "",
+          lunchStartTime: values.lunchStartTime || "",
           isActive: values.isActive,
         });
         if (res.data.isOk) {
@@ -122,6 +144,7 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
           processes: values.processes || [],
           machineOnTime: values.machineOnTime || "",
           machineOffTime: values.machineOffTime || "",
+          lunchStartTime: values.lunchStartTime || "",
           isActive: values.isActive,
         });
         toast.success?.("Machine updated successfully!");
@@ -259,6 +282,27 @@ const MachineFormModal = ({ mode, initialValues, onClose, onSaved }) => {
             </div>
           </div>
 
+          {/* Lunch Break (optional 1-hour slot) — when a Production Entry's
+              own M/C time fully covers this window, that hour is added to
+              its Total Stoppage. */}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Lunch Break</label>
+            <select
+              name="lunchStartTime"
+              value={values.lunchStartTime}
+              onChange={handleChange}
+              className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 bg-white"
+            >
+              <option value="">No Lunch Break</option>
+              {LUNCH_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            {isSubmit && formErrors.lunchStartTime && (
+              <p className="text-xs text-red-500 mt-1">{formErrors.lunchStartTime}</p>
+            )}
+          </div>
+
           {/* Active toggle */}
           <div className="flex items-center gap-2 pt-1">
             <input
@@ -345,6 +389,7 @@ const MachineMaster = () => {
           processes: (m.processes || []).map((p) => (typeof p === "object" ? p._id : p)),
           machineOnTime: m.machineOnTime || "",
           machineOffTime: m.machineOffTime || "",
+          lunchStartTime: m.lunchStartTime || "",
           isActive: m.isActive,
         });
         setEditMachineId(id);
@@ -407,6 +452,7 @@ const MachineMaster = () => {
               <th className="px-4 py-3 font-medium">Description</th>
               <th className="px-4 py-3 font-medium">Processes</th>
               <th className="px-4 py-3 font-medium">Shift Time</th>
+              <th className="px-4 py-3 font-medium">Lunch Break</th>
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium text-right">Actions</th>
             </tr>
@@ -414,7 +460,7 @@ const MachineMaster = () => {
           <tbody>
             {machines.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-4 py-10 text-center text-slate-400">
+                <td colSpan={8} className="px-4 py-10 text-center text-slate-400">
                   {isLoading ? "Loading…" : "No machines found. Click 'Add Machine' to create one."}
                 </td>
               </tr>
@@ -446,6 +492,11 @@ const MachineMaster = () => {
                 </td>
                 <td className="px-4 py-3 text-slate-600 font-mono text-xs whitespace-nowrap">
                   {m.shiftTime ? `${m.shiftTime.onTime} – ${m.shiftTime.offTime}` : <span className="text-slate-400 font-sans">—</span>}
+                </td>
+                <td className="px-4 py-3 text-slate-600 font-mono text-xs whitespace-nowrap">
+                  {m.lunchStartTime
+                    ? LUNCH_OPTIONS.find((o) => o.value === m.lunchStartTime)?.label || m.lunchStartTime
+                    : <span className="text-slate-400 font-sans">—</span>}
                 </td>
                 <td className="px-4 py-3">
                   <span
