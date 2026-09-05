@@ -38,15 +38,22 @@ const MachineSchema = new mongoose.Schema(
       required: [true, "Shift Time End is required"],
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Machine End Time must be HH:mm"],
     },
-    // Optional 1-hour Lunch Break slot for this machine (e.g. "12:00" means
-    // 12:00-13:00) — never required. When a Production Entry's own M/C time
-    // fully covers this window, that hour is added to its Total Stoppage
-    // (see productionCalculation.service.js's computeLunchMin). Blank means
-    // this machine has no configured lunch break.
+    // Optional Lunch Break window for this machine (any length, e.g.
+    // "10:00"-"10:30" or "12:00"-"13:00") — never required. When a
+    // Production Entry's own M/C time fully covers this window, its full
+    // duration is added to that entry's Total Stoppage (see
+    // productionCalculation.service.js's computeLunchMin). Blank means this
+    // machine has no configured lunch break. Both fields are set together —
+    // never one without the other (enforced in machine.controller.js).
     lunchStartTime: {
       type: String, // "HH:mm"
       trim: true,
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Lunch Start Time must be HH:mm"],
+    },
+    lunchEndTime: {
+      type: String, // "HH:mm"
+      trim: true,
+      match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Lunch End Time must be HH:mm"],
     },
     isActive: {
       type: Boolean,

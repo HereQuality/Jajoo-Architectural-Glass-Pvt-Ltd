@@ -167,6 +167,7 @@ function buildData(body) {
     shiftOnTime: body.shiftOnTime || undefined,
     shiftOffTime: body.shiftOffTime || undefined,
     lunchStartTime: body.lunchStartTime || undefined,
+    lunchEndTime: body.lunchEndTime || undefined,
     batchId: body.batchId || undefined,
     othersRemark: typeof body.othersRemark === "string" ? body.othersRemark.trim().slice(0, 300) : "",
   };

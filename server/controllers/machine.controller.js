@@ -24,15 +24,20 @@ function validateMachineTimes(body) {
   else if (!timeRx.test(body.machineOnTime)) errors.machineOnTime = "Machine Start Time must be HH:mm";
   if (!body.machineOffTime) errors.machineOffTime = "Shift Time End is required";
   else if (!timeRx.test(body.machineOffTime)) errors.machineOffTime = "Machine End Time must be HH:mm";
-  // Lunch Break is optional — only validated when actually provided.
+  // Lunch Break is optional — only validated when actually provided, but
+  // when either side is given the other is required too (any-length window,
+  // not just a fixed 1-hour slot).
   if (body.lunchStartTime && !timeRx.test(body.lunchStartTime)) errors.lunchStartTime = "Lunch Start Time must be HH:mm";
+  if (body.lunchEndTime && !timeRx.test(body.lunchEndTime)) errors.lunchEndTime = "Lunch End Time must be HH:mm";
+  if (body.lunchStartTime && !body.lunchEndTime) errors.lunchEndTime = "Lunch End Time is required when Lunch Start Time is set";
+  if (body.lunchEndTime && !body.lunchStartTime) errors.lunchStartTime = "Lunch Start Time is required when Lunch End Time is set";
   return errors;
 }
 
 // Create Machine
 exports.createMachine = async (req, res) => {
   try {
-    const { machineName, machineCode, description, processes, machineOnTime, machineOffTime, lunchStartTime, isActive } = req.body;
+    const { machineName, machineCode, description, processes, machineOnTime, machineOffTime, lunchStartTime, lunchEndTime, isActive } = req.body;
 
     if (!machineName || !machineName.trim()) {
       return res.status(400).json({ isOk: false, message: "Machine name is required" });
@@ -51,6 +56,7 @@ exports.createMachine = async (req, res) => {
       machineOnTime: machineOnTime || undefined,
       machineOffTime: machineOffTime || undefined,
       lunchStartTime: lunchStartTime || undefined,
+      lunchEndTime: lunchEndTime || undefined,
       isActive,
     });
 
@@ -78,17 +84,22 @@ exports.updateMachine = async (req, res) => {
     // Lunch Break is optional — clearing it back to "no lunch" sends "",
     // which would fail the schema's HH:mm match validator if $set directly
     // (unlike machineOnTime/machineOffTime, which are required and can
-    // never be blank). Unset it instead so clearing actually removes it.
+    // never be blank). Unset both sides instead so clearing actually removes
+    // them.
     const update = { ...req.body };
-    let unset;
+    const unset = {};
     if (update.lunchStartTime === "") {
       delete update.lunchStartTime;
-      unset = { lunchStartTime: "" };
+      unset.lunchStartTime = "";
+    }
+    if (update.lunchEndTime === "") {
+      delete update.lunchEndTime;
+      unset.lunchEndTime = "";
     }
 
     const machine = await Machine.findOneAndUpdate(
       { _id: machineId },
-      unset ? { $set: update, $unset: unset } : update,
+      Object.keys(unset).length > 0 ? { $set: update, $unset: unset } : update,
       { new: true, runValidators: true },
     );
 

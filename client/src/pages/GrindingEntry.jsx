@@ -113,7 +113,7 @@ const CALC_COLUMNS = [
 ];
 
 const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if Availability or Performance is NA) — computed per row, from that row's own data";
-const LUNCH_FORMULA = "Lunch = the Machine's configured 1-hour Lunch Break, ADDED INTO Total Stoppage — all-or-nothing: only counted when this row's own M/C time (earliest period's start through latest period's end) FULLY COVERS the lunch window. A row ending even 1 minute before the window closes gets 0, not a partial amount. Blank/0 when this machine has no Lunch Break configured.";
+const LUNCH_FORMULA = "Lunch = the Machine's configured Lunch Break window (any length, e.g. 30 min or 1 hour), ADDED INTO Total Stoppage — all-or-nothing: only counted when this row's own M/C time (earliest period's start through latest period's end) FULLY COVERS the lunch window. A row ending even 1 minute before the window closes gets 0, not a partial amount. Blank/0 when this machine has no Lunch Break configured.";
 const OVERTIME_FORMULA = "Overtime = max(0, Shift On − M/C Start) + max(0, M/C Off − Shift Off) — but only the FIRST entry in a batch can contribute the early-start part, and only the LAST entry can contribute the late-finish part. A middle entry always shows 0 — it isn't touching either shift boundary.";
 const DELAY_EARLY_FORMULA = "Start Delay = max(0, M/C Start − Shift On), only on the FIRST entry in a batch  ·  Early Closed = max(0, Shift Off − M/C Off), only on the LAST entry. A middle entry always shows 0 for both.";
 
@@ -144,6 +144,7 @@ const buildSharedInit = (machineId = "") => ({
   shiftOnTime: "",
   shiftOffTime: "",
   lunchStartTime: "",
+  lunchEndTime: "",
 });
 
 // One repeatable "Machine Timing, Size & Quantities" + its own paired
@@ -1018,7 +1019,7 @@ const GrindingEntry = () => {
     const val = e.target.value;
     setFormProcess(val);
     setLastProcess(val);
-    setValues((prev) => ({ ...prev, machine: "", shiftOnTime: "", shiftOffTime: "", lunchStartTime: "" }));
+    setValues((prev) => ({ ...prev, machine: "", shiftOnTime: "", shiftOffTime: "", lunchStartTime: "", lunchEndTime: "" }));
     // A different Process implies a different Machine list, which
     // invalidates whatever Size/Thickness rows were already filled in —
     // start over with a single blank row rather than leave stale data.
@@ -1336,6 +1337,7 @@ const GrindingEntry = () => {
       shiftOnTime: e.shiftOnTime || machineObj?.machineOnTime || "",
       shiftOffTime: e.shiftOffTime || machineObj?.machineOffTime || "",
       lunchStartTime: e.lunchStartTime || machineObj?.lunchStartTime || "",
+      lunchEndTime: e.lunchEndTime || machineObj?.lunchEndTime || "",
     });
     // Editing always starts from the single existing record as row 0 — any
     // further rows added from here are saved as brand-new entries, joining
@@ -1405,6 +1407,7 @@ const GrindingEntry = () => {
         shiftOnTime: machineObj?.machineOnTime || "",
         shiftOffTime: machineObj?.machineOffTime || "",
         lunchStartTime: machineObj?.lunchStartTime || "",
+        lunchEndTime: machineObj?.lunchEndTime || "",
       }));
       // A different Machine may not offer the same sizes — every row's
       // Size/Thickness/Standard Time (all machine-dependent) resets.
@@ -1472,6 +1475,7 @@ const GrindingEntry = () => {
         shiftOnTime: values.shiftOnTime,
         shiftOffTime: values.shiftOffTime,
         lunchStartTime: values.lunchStartTime,
+        lunchEndTime: values.lunchEndTime,
         ...(effectiveBatchId ? { batchId: effectiveBatchId } : {}),
         ...rowFields,
       };
@@ -1871,8 +1875,9 @@ const GrindingEntry = () => {
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
                   group.map((e) => fmt(e[STOPPAGE_FIELDS[0].key], "min", false))
                 } />
-                {/* Lunch — 60 or 0, see LUNCH_FORMULA. Already folded into
-                    Total Stoppage; shown separately just for visibility. */}
+                {/* Lunch — the configured window's duration or 0, see
+                    LUNCH_FORMULA. Already folded into Total Stoppage; shown
+                    separately just for visibility. */}
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
                   group.map((e) => fmt((e.calculated || {}).lunchMin, "min", false))
                 } />

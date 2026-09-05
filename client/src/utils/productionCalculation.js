@@ -97,24 +97,26 @@ function addMinutesToTime(hhmm, minutesToAdd) {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-// Lunch Break deduction for ONE row (2026-09-08 feature) — added directly
-// into Total Stoppage, by explicit user decision, so Available Working
-// Time/Availability/Performance/OEE% all account for it automatically —
-// mirrors server computeLunchMin exactly. All-or-nothing: only when this
-// row's own span (see rowOwnSpan) FULLY COVERS the machine's configured
-// 1-hour Lunch Break window does the full 60 minutes count.
-export function computeLunchMin(row, lunchStartTime) {
+// Lunch Break deduction for ONE row (2026-09-08 feature, any-length window
+// since 2026-09-05) — added directly into Total Stoppage, by explicit user
+// decision, so Available Working Time/Availability/Performance/OEE% all
+// account for it automatically — mirrors server computeLunchMin exactly.
+// All-or-nothing: only when this row's own span (see rowOwnSpan) FULLY
+// COVERS the machine's configured Lunch Break window does its full duration
+// count. `lunchEndTime` falls back to start+60 for legacy rows saved before
+// the end time was captured (when lunch was always a fixed 1-hour slot).
+export function computeLunchMin(row, lunchStartTime, lunchEndTime) {
   if (!lunchStartTime) return 0;
-  const lunchEndTime = addMinutesToTime(lunchStartTime, 60);
+  const resolvedEndTime = lunchEndTime || addMinutesToTime(lunchStartTime, 60);
   const ownSpan = rowOwnSpan(row);
   const lunchStartMin = timeToMinutes(lunchStartTime);
-  let lunchEndMin = timeToMinutes(lunchEndTime);
+  let lunchEndMin = timeToMinutes(resolvedEndTime);
   if (lunchEndMin <= lunchStartMin) lunchEndMin += 24 * 60;
   const rowStartMin = timeToMinutes(ownSpan.start);
   let rowEndMin = timeToMinutes(ownSpan.end);
   if (rowEndMin <= rowStartMin) rowEndMin += 24 * 60;
   const covers = rowStartMin <= lunchStartMin && rowEndMin >= lunchEndMin;
-  return covers ? 60 : 0;
+  return covers ? (lunchEndMin - lunchStartMin) : 0;
 }
 
 // Overtime / Start Delay / Early Closed, gated by this row's position in its
@@ -172,7 +174,7 @@ function computeBatchRowScheduleCalcs(rows, shiftOnTime, shiftOffTime) {
     const isFirst = i === 0;
     const isLast = i === sorted.length - 1;
     const ownSpan = rowOwnSpan(row);
-    const lunchMin = computeLunchMin(row, row.lunchStartTime);
+    const lunchMin = computeLunchMin(row, row.lunchStartTime, row.lunchEndTime);
     const totalStoppageMin = STOPPAGE_KEYS.reduce((s, k) => s + num(row[k]), 0) + lunchMin;
     const { overtimeMin, startDelayMin, earlyClosedMin } = deriveShiftDeltaForRow(
       shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast,

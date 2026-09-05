@@ -96,12 +96,16 @@ const ProductionEntrySchema = new mongoose.Schema(
       type: String, // "HH:mm"
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Shift Off Time must be HH:mm"],
     },
-    // Snapshot of the Machine's optional Lunch Break start time (1-hour
-    // slot) at save time — same reasoning as shiftOnTime/shiftOffTime above.
-    // Blank when the machine has no lunch break configured.
+    // Snapshot of the Machine's optional Lunch Break window (any length) at
+    // save time — same reasoning as shiftOnTime/shiftOffTime above. Blank
+    // when the machine has no lunch break configured.
     lunchStartTime: {
       type: String, // "HH:mm"
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Lunch Start Time must be HH:mm"],
+    },
+    lunchEndTime: {
+      type: String, // "HH:mm"
+      match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Lunch End Time must be HH:mm"],
     },
 
     // ── Size & thickness (from StandardTime master) ──────────────────────

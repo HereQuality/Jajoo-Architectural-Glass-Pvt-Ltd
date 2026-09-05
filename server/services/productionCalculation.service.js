@@ -239,9 +239,9 @@ function rowEffectiveRunMin(row) {
 }
 
 // Adds `minutesToAdd` minutes to an HH:mm clock time, wrapping past
-// midnight if needed. Used to derive a 1-hour Lunch Break window's end from
-// its start — Machine Master only stores the start, the window is always
-// exactly 1 hour.
+// midnight if needed. Used only as a fallback (see computeLunchMin below) to
+// derive a legacy row's Lunch Break end from its start when no explicit end
+// was ever snapshotted.
 function addMinutesToTime(hhmm, minutesToAdd) {
   const total = (timeToMinutes(hhmm) + minutesToAdd + 1440) % 1440;
   const h = Math.floor(total / 60);
@@ -249,28 +249,31 @@ function addMinutesToTime(hhmm, minutesToAdd) {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-// Lunch Break deduction for ONE row (2026-09-08 feature) — by explicit user
-// decision this is added directly INTO Total Stoppage (see
-// computeRowCalculations below), so Available Working Time/Availability/
-// Performance/OEE% all account for it automatically with no separate
-// formula changes. All-or-nothing: only when this row's own span (see
-// rowOwnSpan) FULLY COVERS the machine's configured 1-hour Lunch Break
-// window does the full 60 minutes count — e.g. a row ending at 12:59
-// against a 12:00-13:00 lunch window gets 0 minutes, not a partial 59.
-// `lunchStartTime` is this row's own snapshot of the Machine's Lunch Break
-// config (see the model file) — blank when that machine has none set.
-function computeLunchMin(row, lunchStartTime) {
+// Lunch Break deduction for ONE row (2026-09-08 feature, any-length window
+// since 2026-09-05) — by explicit user decision this is added directly INTO
+// Total Stoppage (see computeRowCalculations below), so Available Working
+// Time/Availability/Performance/OEE% all account for it automatically with
+// no separate formula changes. All-or-nothing: only when this row's own
+// span (see rowOwnSpan) FULLY COVERS the machine's configured Lunch Break
+// window does its full duration count — e.g. a row ending 1 minute before a
+// 10:00-10:30 lunch window closes gets 0 minutes, not a partial 29.
+// `lunchStartTime`/`lunchEndTime` are this row's own snapshot of the
+// Machine's Lunch Break config (see the model file) — blank when that
+// machine has none set. `lunchEndTime` falls back to start+60 for legacy
+// rows saved before the end time was captured (when lunch was always a
+// fixed 1-hour slot).
+function computeLunchMin(row, lunchStartTime, lunchEndTime) {
   if (!lunchStartTime) return 0;
-  const lunchEndTime = addMinutesToTime(lunchStartTime, 60);
+  const resolvedEndTime = lunchEndTime || addMinutesToTime(lunchStartTime, 60);
   const ownSpan = rowOwnSpan(row);
   const lunchStartMin = timeToMinutes(lunchStartTime);
-  let lunchEndMin = timeToMinutes(lunchEndTime);
+  let lunchEndMin = timeToMinutes(resolvedEndTime);
   if (lunchEndMin <= lunchStartMin) lunchEndMin += 24 * 60;
   const rowStartMin = timeToMinutes(ownSpan.start);
   let rowEndMin = timeToMinutes(ownSpan.end);
   if (rowEndMin <= rowStartMin) rowEndMin += 24 * 60;
   const covers = rowStartMin <= lunchStartMin && rowEndMin >= lunchEndMin;
-  return covers ? 60 : 0;
+  return covers ? (lunchEndMin - lunchStartMin) : 0;
 }
 
 // Overtime / Start Delay / Early Closed, derived from Shift On/Off vs. the
@@ -366,7 +369,7 @@ function computeRowCalculations(row, shiftOnTime, shiftOffTime, isFirst = true, 
 
   // Lunch Break (2026-09-08) is added directly into Total Stoppage, by
   // explicit user decision — see computeLunchMin's comment above.
-  const lunchMin = computeLunchMin(row, row.lunchStartTime);
+  const lunchMin = computeLunchMin(row, row.lunchStartTime, row.lunchEndTime);
   const totalStoppageMin = STOPPAGE_KEYS.reduce((s, k) => s + num(row[k]), 0) + lunchMin;
 
   const workingScheduleMin = rowWorkingScheduleMin(shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast);
