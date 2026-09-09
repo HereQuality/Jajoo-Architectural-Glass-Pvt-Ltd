@@ -49,8 +49,32 @@ async function validatePayload(body) {
 
   if (!body.mcOffTime) errors.mcOffTime = "M/C Off Time is required";
   else if (!timeRx.test(body.mcOffTime)) errors.mcOffTime = "Must be HH:mm format";
-  else if (!errors.mcStartTime && body.mcOffTime <= body.mcStartTime)
+  // Off <= Start is only allowed when the client has explicitly flagged the
+  // machine as running past midnight (mcOffNextDay) — otherwise it's almost
+  // always a typo, not a real overnight run.
+  else if (!errors.mcStartTime && !body.mcOffNextDay && body.mcOffTime <= body.mcStartTime)
     errors.mcOffTime = "M/C Off Time cannot be earlier than or equal to M/C Start Time";
+
+  // M/C Off Date isn't a free pick — the ONLY valid value is the entry's
+  // own Date + 1 calendar day (no past, no present, nothing further out),
+  // matching the client's locked (non-picker) UI exactly. Compared via UTC
+  // calendar-date components so the check is stable regardless of the
+  // server's local timezone.
+  if (body.mcOffNextDay) {
+    if (!body.mcOffDate) {
+      errors.mcOffDate = "M/C Off Date is required when M/C Off Time is on the next day";
+    } else {
+      const toUtcDateOnly = (v) => {
+        const d = new Date(v);
+        return isNaN(d.getTime()) ? null : Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+      };
+      const entryDay = body.date ? toUtcDateOnly(body.date) : null;
+      const offDay = toUtcDateOnly(body.mcOffDate);
+      if (entryDay !== null && offDay !== null && offDay !== entryDay + 24 * 60 * 60 * 1000) {
+        errors.mcOffDate = "M/C Off Date must be exactly 1 day after the entry Date";
+      }
+    }
+  }
 
   const dims = { sizeWidthMm: "Width", sizeHeightMm: "Height" };
   for (const [k, label] of Object.entries(dims)) {
@@ -163,6 +187,8 @@ function buildData(body) {
     date: body.date || Date.now(),
     mcStartTime: body.mcStartTime,
     mcOffTime: body.mcOffTime,
+    mcOffNextDay: !!body.mcOffNextDay,
+    mcOffDate: body.mcOffNextDay && body.mcOffDate ? body.mcOffDate : undefined,
     additionalPeriods: sanitizeAdditionalPeriods(body.additionalPeriods),
     shiftOnTime: body.shiftOnTime || undefined,
     shiftOffTime: body.shiftOffTime || undefined,

@@ -4,6 +4,10 @@
  * actually enforces the 2-working-day edit window; this one must never be
  * trusted as the source of truth.
  *
+ * The edit window is anchored to when an entry was actually SAVED
+ * (`createdAt`), not its `date` field (the production date it's for) — see
+ * GrindingEntry.jsx's isEntryEditable call site.
+ *
  * Working week excludes whatever day(s) are configured as "weekly off"
  * (Tuesday by default — see useCompanySettings / Holiday Master). Company
  * holidays are skipped the same way — see buildHolidaySet.

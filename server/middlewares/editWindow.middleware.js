@@ -5,10 +5,14 @@
  * Enforces the "2 working days" edit window on Production Entries
  * (see server/utils/workingDays.js for the working-day math — the
  * configured weekly-off day(s) don't count, and Company Holidays don't
- * count either). Applied to PUT/DELETE routes for :entryId, after
- * requireMenuPermission has already confirmed the user has write access to
- * the page at all. SuperAdmin bypasses this, same convention as
- * requireMenuPermission's own SuperAdmin bypass.
+ * count either). Anchored to `createdAt` — when the entry was actually
+ * SAVED — not its `date` field (the production date it's for), so a
+ * backdated entry isn't already outside its edit window the moment it's
+ * created; the window always runs 2 working days forward from the entry
+ * moment itself, whatever date it was written for. Applied to PUT/DELETE
+ * routes for :entryId, after requireMenuPermission has already confirmed
+ * the user has write access to the page at all. SuperAdmin bypasses this,
+ * same convention as requireMenuPermission's own SuperAdmin bypass.
  */
 
 const ProductionEntry = require("../models/ProductionEntry");
@@ -21,7 +25,7 @@ const requireEditWindow = async (req, res, next) => {
   try {
     if (req.user?.roleType === "SuperAdmin") return next();
 
-    const entry = await ProductionEntry.findById(req.params.entryId).select("date");
+    const entry = await ProductionEntry.findById(req.params.entryId).select("createdAt");
     if (!entry) return next(new AppError("Entry not found", 404));
 
     const [holidays, settings] = await Promise.all([
@@ -30,7 +34,7 @@ const requireEditWindow = async (req, res, next) => {
     ]);
     const holidaySet = buildHolidaySet(holidays);
 
-    if (!isEntryEditable(entry.date, new Date(), 2, holidaySet, settings?.weeklyOffDays)) {
+    if (!isEntryEditable(entry.createdAt, new Date(), 2, holidaySet, settings?.weeklyOffDays)) {
       return next(
         new AppError(
           "Edit window closed — entries can only be edited within 2 working days.",

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo } from "react";
 import ReactDOM from "react-dom";
 import Select, { components as selectComponents } from "react-select";
-import { Plus, Minus, X, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock, ChevronRight, ChevronDown, ChevronLeft } from "lucide-react";
+import { Plus, Minus, X, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock, ChevronRight, ChevronDown, ChevronLeft, CalendarDays } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { MenuContext } from "../context/MenuContext";
@@ -153,6 +153,10 @@ const buildSharedInit = (machineId = "") => ({
 const buildRow = () => ({
   mcStartTime: "",
   mcOffTime: "",
+  // M/C Off Date, when relevant, is never stored on the row itself — it's
+  // always derived live from the shared Date (see mcOffDateFor), so there's
+  // no stale-copy risk if the shared Date changes after checking this.
+  mcOffNextDay: false,
   additionalPeriods: [],
   sizeWidthMm: "",
   sizeHeightMm: "",
@@ -184,6 +188,17 @@ const noWheelChange = (el) => {
 const timeToMinutes = (hhmm) => {
   const [h, m] = String(hhmm).split(":").map(Number);
   return h * 60 + m;
+};
+
+// "YYYY-MM-DD" + 1 calendar day, as another "YYYY-MM-DD" — used to default
+// M/C Off Date to the day after the entry's own Date when "Next day" is
+// first checked. Local-date arithmetic (no timezone/UTC shift) via
+// parseLocalDate, same convention as the rest of this file.
+const addOneDay = (dateStr) => {
+  if (!dateStr) return "";
+  const d = parseLocalDate(dateStr);
+  d.setDate(d.getDate() + 1);
+  return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0")].join("-");
 };
 
 // True if two [start, off) M/C time windows for the same Machine/Date
@@ -271,7 +286,10 @@ const validateRow = (row, shared) => {
   else if (!timeRx.test(row.mcStartTime)) e.mcStartTime = "Use HH:mm format";
   if (!row.mcOffTime) e.mcOffTime = "M/C Off Time is required";
   else if (!timeRx.test(row.mcOffTime)) e.mcOffTime = "Use HH:mm format";
-  else if (!e.mcStartTime && row.mcOffTime <= row.mcStartTime) e.mcOffTime = "M/C Off Time cannot be earlier than or equal to M/C Start Time";
+  // Off <= Start is only allowed once "Next day" is checked — otherwise
+  // it's almost always a typo, not a genuine overnight run.
+  else if (!e.mcStartTime && !row.mcOffNextDay && row.mcOffTime <= row.mcStartTime)
+    e.mcOffTime = "M/C Off Time cannot be earlier than or equal to M/C Start Time — check \"Next day\" if the machine ran past midnight.";
 
   // Extra M/C ON/OFF periods for this SAME row (a pause/resume within one
   // entry) — mirrors server validateAdditionalPeriods exactly: each valid
@@ -1174,6 +1192,20 @@ const GrindingEntry = () => {
     updateRow(index, { [name]: value });
   };
 
+  // "Next day" checkbox above M/C Off Time — no manual date picker: M/C Off
+  // Date is ALWAYS exactly the entry's own Date + 1 day, never editable, so
+  // there's no way to pick a past/present/>1-day date by mistake. Kept in
+  // sync live off `values.date` at render/submit time (see mcOffDateFor
+  // below and buildPayload), not frozen at the moment the box was checked —
+  // so it stays correct even if the shared Date is changed afterward.
+  const handleMcOffNextDayToggle = (index, checked) => {
+    updateRow(index, { mcOffNextDay: checked });
+  };
+
+  // The one and only allowed M/C Off Date for a "Next day" row — the
+  // entry's own Date + 1, always, never picked freely.
+  const mcOffDateFor = () => addOneDay(values.date);
+
 
   // Rejection Reasons share one budget: Production Qty − OK Qty. Each field
   // is clamped to whatever's left of that budget after every OTHER reason
@@ -1348,6 +1380,7 @@ const GrindingEntry = () => {
       __entryId: e._id,
       mcStartTime: e.mcStartTime || "",
       mcOffTime: e.mcOffTime || "",
+      mcOffNextDay: !!e.mcOffNextDay,
       additionalPeriods: Array.isArray(e.additionalPeriods)
         ? e.additionalPeriods.map((p) => ({ startTime: p.startTime || "", endTime: p.endTime || "" }))
         : [],
@@ -1478,6 +1511,11 @@ const GrindingEntry = () => {
         lunchEndTime: values.lunchEndTime,
         ...(effectiveBatchId ? { batchId: effectiveBatchId } : {}),
         ...rowFields,
+        // Always recomputed fresh off the CURRENT shared Date, never the
+        // (possibly stale) value stored on the row at toggle time — so
+        // editing the shared Date after checking "Next day" can't leave a
+        // mismatched M/C Off Date behind.
+        mcOffDate: rowFields.mcOffNextDay ? mcOffDateFor() : "",
       };
     };
 
@@ -1846,7 +1884,17 @@ const GrindingEntry = () => {
                 <td className="bg-fuchsia-50/60 dark:bg-fuchsia-900/15 px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-fuchsia-800 dark:text-fuchsia-300 font-medium">{first.operator?.name || "—"}</td>
                 {/* M/C Start / M/C Off — one per entry in the batch */}
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs`} items={group.map((e) => e.mcStartTime || "—")} />
-                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs`} items={group.map((e) => e.mcOffTime || "—")} />
+                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs`} items={group.map((e) => (
+                  <>
+                    {e.mcOffTime || "—"}
+                    {e.mcOffNextDay && (
+                      <span
+                        className="ml-1 font-sans text-[9px] font-semibold text-amber-600 dark:text-amber-400 align-top"
+                        title={`Machine ran past midnight — M/C Off was on ${e.mcOffDate ? new Date(e.mcOffDate).toLocaleDateString("en-GB") : "the next day"}. OEE/Availability for this entry still counts under its own Date (${e.date ? new Date(e.date).toLocaleDateString("en-GB") : "as entered"}), not the next day.`}
+                      >+1d</span>
+                    )}
+                  </>
+                ))} />
 
                 <td className={`${plainBg} px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400`}>{first.shiftOnTime || (typeof first.machine === "object" ? first.machine?.machineOnTime : null) || "—"}</td>
                 <td className={`${plainBg} px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 font-mono text-xs text-slate-500 dark:text-slate-400`}>{first.shiftOffTime || (typeof first.machine === "object" ? first.machine?.machineOffTime : null) || "—"}</td>
@@ -1946,7 +1994,12 @@ const GrindingEntry = () => {
                 <StackedCell
                   className={`sticky right-0 z-10 w-[90px] px-3 whitespace-nowrap border-l border-b border-slate-300 dark:border-slate-700 ${plainBgSolid} shadow-[-4px_0_10px_rgba(0,0,0,0.05)]`}
                   items={group.map((e) => {
-                    const editable = isEntryEditable(parseLocalDate(e.date), new Date(), 2, holidaySet, weeklyOffDays);
+                    // Anchored to when the entry was actually SAVED
+                    // (createdAt), not the production Date field it's
+                    // for — a backdated entry (Date in the past) must not
+                    // already be stuck outside its edit window the moment
+                    // it's created.
+                    const editable = isEntryEditable(new Date(e.createdAt), new Date(), 2, holidaySet, weeklyOffDays);
                     return (
                       <div key={e._id} className="flex justify-end gap-2">
                         {currentPagePermissions.edit && (
@@ -2147,7 +2200,30 @@ const GrindingEntry = () => {
                     {isOpen && (
                       <div className="space-y-2 mt-2">
 
-                        {/* M/C Start/Off Time */}
+                        {/* Checkbox sits above the whole M/C Start/Off Time
+                            row — for a continuous machine still running past
+                            midnight, so Off Time (e.g. 02:00) is naturally
+                            earlier than Start Time (e.g. 22:00). Checking it
+                            unlocks that "earlier" value instead of rejecting
+                            it as a typo, and reveals M/C Off Date to record
+                            which actual calendar day it stopped on — avoids
+                            the Date-field mismatch that would otherwise
+                            throw off day-wise OEE reporting. */}
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={!!row.mcOffNextDay}
+                            onChange={(e) => handleMcOffNextDayToggle(idx, e.target.checked)}
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                          />
+                          <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                            Machine running past midnight (M/C Off is next day)
+                          </span>
+                        </label>
+
+                        {/* M/C Start/Off Time — always on the same level,
+                            regardless of whether the checkbox above is
+                            checked. */}
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">
                           <div>
                             <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Start Time <span className="text-red-500">*</span></label>
@@ -2168,11 +2244,30 @@ const GrindingEntry = () => {
                               onChange={(e) => handleRowChange(idx, e)}
                               hasError={!!rErr("mcOffTime")}
                               placeholder="--:--"
-                              minTime={row.mcStartTime || undefined}
+                              minTime={row.mcOffNextDay ? undefined : (row.mcStartTime || undefined)}
                             />
                             {rErr("mcOffTime") && <p className="text-[10px] text-red-500 mt-0.5 leading-tight">{rErr("mcOffTime")}</p>}
                           </div>
                         </div>
+
+                        {row.mcOffNextDay && (
+                          <div className="sm:w-1/2 sm:pr-1.5">
+                            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">M/C Off Date</label>
+                            {/* Locked, not a picker — the ONLY valid M/C Off
+                                Date for a "Next day" row is the entry's own
+                                Date + 1, never a free choice (no past,
+                                present, or >1-day date), so there's nothing
+                                for the user to select here. */}
+                            <div className="w-full flex items-center gap-2 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 rounded-xl px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300">
+                              <CalendarDays className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              {fmtDate(mcOffDateFor())}
+                              <span className="text-[10px] text-slate-400">(Date + 1, fixed)</span>
+                            </div>
+                            <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1 leading-tight">
+                              Note: OEE/Availability for this entry still counts under the entry's own <strong>Date</strong> above (the shift it started on) — this only records that the machine physically stopped on {fmtDate(mcOffDateFor())}.
+                            </p>
+                          </div>
+                        )}
 
                         {/* Size & Thickness */}
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1">

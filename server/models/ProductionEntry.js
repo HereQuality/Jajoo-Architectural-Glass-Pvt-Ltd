@@ -61,6 +61,21 @@ const ProductionEntrySchema = new mongoose.Schema(
       required: [true, "M/C Off Time is required"],
       match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "M/C Off Time must be HH:mm"],
     },
+    // Set when the machine ran past midnight, so mcOffTime's clock value is
+    // actually EARLIER than mcStartTime's (e.g. Start 22:00, Off 02:00) —
+    // without this flag that would look like an invalid/backwards time
+    // range. computeRowCalculations doesn't need it: shiftDuration already
+    // treats any Off <= Start as crossing midnight and adds 24h on its own.
+    // This pair exists purely to record which ACTUAL calendar date M/C Off
+    // happened on, for display/reporting — mcOffDate is only meaningful
+    // (and only required client-side) when mcOffNextDay is true.
+    mcOffNextDay: {
+      type: Boolean,
+      default: false,
+    },
+    mcOffDate: {
+      type: Date,
+    },
     // Extra M/C ON/OFF periods for THIS SAME entry, beyond the primary
     // mcStartTime/mcOffTime pair above — e.g. the machine ran, paused, then
     // resumed, but it's still one production/downtime record (added

@@ -2,14 +2,17 @@
 
 /**
  * Edit-window rule for Production Entries: an entry stays editable for up
- * to 2 working days after its date. The working week excludes whatever
- * day(s) are configured as "weekly off" (server/models/CompanySettings.js
- * — Tuesday by default, editable from Holiday Master). Company holidays
- * (server/models/CompanyHoliday.js) don't count either, for exactly the
- * same reason: buildHolidaySet/isHoliday below just make a holiday another
- * day isWorkingDay() says no to, so the 2-working-day window naturally
- * extends one more calendar day past it — no separate "bypass" branch
- * needed.
+ * to 2 working days after it was actually SAVED (`createdAt`) — not its
+ * `date` field (the production date it's for), so a backdated entry isn't
+ * already outside its edit window the instant it's created; the window
+ * always counts forward from the entry moment itself. The working week
+ * excludes whatever day(s) are configured as "weekly off"
+ * (server/models/CompanySettings.js — Tuesday by default, editable from
+ * Holiday Master). Company holidays (server/models/CompanyHoliday.js)
+ * don't count either, for exactly the same reason: buildHolidaySet/
+ * isHoliday below just make a holiday another day isWorkingDay() says no
+ * to, so the 2-working-day window naturally extends one more calendar day
+ * past it — no separate "bypass" branch needed.
  */
 
 const DEFAULT_WEEKLY_OFF_DAYS = [2]; // Date#getDay(): 0=Sun..6=Sat — Tuesday, used if settings haven't loaded yet
