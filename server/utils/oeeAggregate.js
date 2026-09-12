@@ -32,14 +32,14 @@ function aggregateOee(entries) {
     sumStdMinutes += (Number(e.processQty) || 0) * (Number(e.standardTimePerPieceMin) || 0);
   }
 
-  const { workingScheduleMin: sumWork, availableWorkingMin: sumAvail, effectiveMcRunTimeMin: sumEffectiveRun } =
+  const { workingScheduleMin: sumWork, plannedProductionMin: sumPlanned, availableWorkingMin: sumAvail, effectiveMcRunTimeMin: sumEffectiveRun } =
     aggregateBatchLevelTotals(entries);
 
-  // Availability = Effective Run Time ÷ Available Working Time, capped at
-  // 100% (see productionCalculation.service.js's capping note). Performance
-  // = Standard Minutes for Output ÷ Effective Run Time. Mirrors
+  // Availability = Available Working Time ÷ Planned Production Time
+  // (standard OEE, see productionCalculation.service.js's 2026-09-11 note).
+  // Performance = Standard Minutes for Output ÷ Effective Run Time. Mirrors
   // productionCalculation.service.js's computeBatchCalculations.
-  const availRatio = sumAvail > 0 ? Math.min(100, (sumEffectiveRun / sumAvail) * 100) : 0;
+  const availRatio = sumPlanned > 0 ? Math.min(100, (sumAvail / sumPlanned) * 100) : 0;
   const qualRatio = sumProcess > 0 ? (sumOk / sumProcess) * 100 : 0;
   const perfRatio = sumEffectiveRun > 0 ? (sumStdMinutes / sumEffectiveRun) * 100 : 0;
   const oee = (availRatio / 100) * (perfRatio / 100) * (qualRatio / 100) * 100;

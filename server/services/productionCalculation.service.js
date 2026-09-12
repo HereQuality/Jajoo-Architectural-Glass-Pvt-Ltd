@@ -80,9 +80,11 @@
  *                             SAME ROW (see the 2026-09-06 note) — a gap
  *                             between two different rows belongs to
  *                             neither (see the 2026-09-07 revert note).
- *   Availability Ratio      = Effective M/C Run Time ÷ Available Working
- *                             Time (NA if AWT is NA), capped at 100% (see
- *                             the note on capping below).
+ *   Planned Production Time = Working Schedule Time − Planned Downtime −
+ *                             Lunch Break (floored at 0)
+ *   Availability Ratio      = Available Working Time ÷ Planned Production
+ *                             Time (NA if Planned Production Time is 0) —
+ *                             standard OEE, see the 2026-09-11 note below.
  *   Performance Ratio       = (this row's own Production Qty × Standard
  *                             Time) ÷ this row's own Effective M/C Run Time
  *                             (NA if AWT is NA) — the classic OEE
@@ -107,13 +109,8 @@
  * whole shift while stoppage is ALSO logged within it, Effective Run Time
  * (not stoppage-adjusted) can come out bigger than Available Working Time
  * (which IS stoppage-adjusted), which would otherwise give a
- * mathematically nonsensical >100% Availability Ratio / negative
- * Unreported Time — both are clamped to prevent that (added 2026-09-02).
- * This triggers more often for middle rows now (their Working Schedule
- * Time is exactly their own M/C span, same as Effective Run Time, so ANY
- * stoppage logged on a middle row pushes Effective past Available) — that's
- * expected, not a regression: it correctly flags "this row claims stoppage
- * minutes inside a window no bigger than its own claimed run time."
+ * negative Unreported Time — clamped at 0 to prevent that (added
+ * 2026-09-02). This used to also apply to Availability, until 2026-09-11.
  *
  * `calculated` is computed server-side at save time and stored, so
  * historical rows never change unless explicitly recomputed (see
@@ -155,6 +152,16 @@
  * multi-period behavior: a pause between two periods of the SAME row still
  * flows into that row's own Unreported Time, since that only depends on
  * this row's own span vs. its own summed run time, never the next row.
+ *
+ * 2026-09-11: Availability Ratio switched to the standard OEE definition —
+ * Available Working Time ÷ Planned Production Time (Working Schedule Time
+ * minus the PLANNED stops only: Planned Downtime + Lunch Break). The old
+ * Effective M/C Run Time ÷ Available Working Time came out ≥100% for almost
+ * every entry (Effective Run Time is the raw M/C span and doesn't subtract
+ * stoppage logged inside it, while AWT does), so the 100% cap hid it and
+ * breakdowns/changeovers/etc. never lowered Availability — 48 of 62 live
+ * entries showed exactly 100%. Now every unplanned stoppage minute lowers
+ * Availability, while planned stops don't count against the machine.
  */
 
 // Downtime & Stoppage Reason fields summed for Total Stoppage — INCLUDES
@@ -390,10 +397,12 @@ function computeRowCalculations(row, shiftOnTime, shiftOffTime, isFirst = true, 
   // history note).
   const unreportedTimeMin = round2(Math.max(0, availableWorkingMin - effectiveMcRunTimeMin));
 
-  // Availability Ratio, capped at 100% (see the file header's capping
-  // note) — NA (null) rather than 0 when Available Working Time is 0, since
-  // 0 ÷ 0 is undefined, not "0% availability".
-  const availabilityRatio = availableWorkingMin > 0 ? Math.min(1, effectiveMcRunTimeMin / availableWorkingMin) : null;
+  // Availability Ratio — standard OEE (2026-09-11, see the file header):
+  // Available Working Time ÷ Planned Production Time. NA (null) when
+  // Planned Production Time is 0 (the whole schedule was planned stops).
+  const plannedStopMin = num(row.plannedDowntimeMin) + lunchMin;
+  const plannedProductionMin = Math.max(0, workingScheduleMin - plannedStopMin);
+  const availabilityRatio = plannedProductionMin > 0 ? Math.min(1, availableWorkingMin / plannedProductionMin) : null;
 
   // Performance Ratio deliberately stays based on this row's own raw
   // Effective M/C Run Time (not Available Working Time) — Performance
@@ -415,6 +424,7 @@ function computeRowCalculations(row, shiftOnTime, shiftOffTime, isFirst = true, 
     lunchMin:              round2(lunchMin),
     totalStoppageMin:      round2(totalStoppageMin),
     workingScheduleMin:    round2(workingScheduleMin),
+    plannedProductionMin:  round2(plannedProductionMin),
     availableWorkingMin:   round2(availableWorkingMin),
     idealProductionQty:    round2(computeRowIdealProductionQty(row)),
     effectiveMcRunTimeMin: round2(effectiveMcRunTimeMin),
@@ -483,7 +493,9 @@ function computeBatchCalculations(rows, shiftOnTime, shiftOffTime) {
 
   const unreportedTimeMin = round2(Math.max(0, availableWorkingMin - effectiveMcRunTimeMin));
 
-  const availabilityRatio = availableWorkingMin > 0 ? Math.min(1, effectiveMcRunTimeMin / availableWorkingMin) : null;
+  // Standard OEE Availability — same per-row rule, from combined totals.
+  const plannedProductionMin = round2(perRow.reduce((s, c) => s + c.plannedProductionMin, 0));
+  const availabilityRatio = plannedProductionMin > 0 ? Math.min(1, availableWorkingMin / plannedProductionMin) : null;
 
   // Performance stays anchored to the batch's combined raw Effective M/C
   // Run Time (not Available Working Time) — same per-row rule, summed.
@@ -503,6 +515,7 @@ function computeBatchCalculations(rows, shiftOnTime, shiftOffTime) {
     lunchMin:             round2(lunchMin),
     totalStoppageMin:     round2(totalStoppageMin),
     workingScheduleMin:   round2(workingScheduleMin),
+    plannedProductionMin: round2(plannedProductionMin),
     availableWorkingMin:  round2(availableWorkingMin),
     effectiveMcRunTimeMin:round2(effectiveMcRunTimeMin),
     unreportedTimeMin:    round2(unreportedTimeMin),
@@ -532,15 +545,17 @@ function aggregateBatchLevelTotals(entries) {
   }
 
   let workingScheduleMin = 0;
+  let plannedProductionMin = 0;
   let availableWorkingMin = 0;
   let effectiveMcRunTimeMin = 0;
   for (const rows of batches.values()) {
     const batchCalc = computeBatchCalculations(rows, rows[0].shiftOnTime, rows[0].shiftOffTime);
     workingScheduleMin += batchCalc.workingScheduleMin || 0;
+    plannedProductionMin += batchCalc.plannedProductionMin || 0;
     if (batchCalc.availableWorkingMin != null) availableWorkingMin += batchCalc.availableWorkingMin;
     effectiveMcRunTimeMin += batchCalc.effectiveMcRunTimeMin || 0;
   }
-  return { workingScheduleMin, availableWorkingMin, effectiveMcRunTimeMin };
+  return { workingScheduleMin, plannedProductionMin, availableWorkingMin, effectiveMcRunTimeMin };
 }
 
 // Groups `entries` by batchId (a standalone entry is its own batch of one),

@@ -54,17 +54,19 @@ function aggregateEfficiencyByGroup(entries, keyFn, nameFn) {
   for (const g of groups.values()) {
     const totals = aggregateBatchLevelTotals(g.rows);
     g.workingScheduleMin = totals.workingScheduleMin;
+    g.plannedProductionMin = totals.plannedProductionMin;
     g.availableWorkingMin = totals.availableWorkingMin;
     g.effectiveMcRunTimeMin = totals.effectiveMcRunTimeMin;
   }
 
   return [...groups.values()]
     .map((g) => {
-      // Availability = Effective Run Time ÷ Available Working Time, capped
-      // at 100% (see productionCalculation.service.js's capping note).
-      // Performance = Standard Minutes for Output ÷ Effective Run Time.
-      // Mirrors productionCalculation.service.js's computeBatchCalculations.
-      const availabilityRatio = g.availableWorkingMin > 0 ? round2(Math.min(100, (g.effectiveMcRunTimeMin / g.availableWorkingMin) * 100)) : null;
+      // Availability = Available Working Time ÷ Planned Production Time
+      // (standard OEE, see productionCalculation.service.js's 2026-09-11
+      // note). Performance = Standard Minutes for Output ÷ Effective Run
+      // Time. Mirrors productionCalculation.service.js's
+      // computeBatchCalculations.
+      const availabilityRatio = g.plannedProductionMin > 0 ? round2(Math.min(100, (g.availableWorkingMin / g.plannedProductionMin) * 100)) : null;
       const performanceRatio = g.effectiveMcRunTimeMin > 0 ? round2((g.stdMinutesForOutput / g.effectiveMcRunTimeMin) * 100) : null;
       const qualityRatio = g.processQty > 0 ? round2((g.okQty / g.processQty) * 100) : null;
       const oeePercent =

@@ -96,7 +96,7 @@ const CALC_COLUMNS = [
     key: "availabilityRatio",
     label: "Availability Ratio",
     unit: "",
-    formula: "Availability Ratio = Effective M/C Run Time ÷ Available Working Time, capped at 100% (NA if Available Working Time is 0) — per row",
+    formula: "Availability Ratio = Available Working Time ÷ Planned Production Time, where Planned Production Time = Working Schedule Time − Planned Downtime − Lunch Break (NA if Planned Production Time is 0) — per row",
   },
   {
     key: "performanceRatio",

@@ -199,6 +199,7 @@ const ProductionEntrySchema = new mongoose.Schema(
       lunchMin:              { type: Number, default: 0 },
       totalStoppageMin:      { type: Number, default: 0 },
       workingScheduleMin:    { type: Number, default: 0 },
+      plannedProductionMin:  { type: Number, default: 0 },
       availableWorkingMin:   { type: Number, default: 0 },
       idealProductionQty:    { type: Number, default: 0 },
       effectiveMcRunTimeMin: { type: Number, default: 0 },

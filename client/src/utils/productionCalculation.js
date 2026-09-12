@@ -179,8 +179,12 @@ function computeBatchRowScheduleCalcs(rows, shiftOnTime, shiftOffTime) {
     const { overtimeMin, startDelayMin, earlyClosedMin } = deriveShiftDeltaForRow(
       shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast,
     );
+    const workingScheduleMin = rowWorkingScheduleMin(shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast);
     return {
-      workingScheduleMin: rowWorkingScheduleMin(shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast),
+      workingScheduleMin,
+      // Standard OEE Planned Production Time — see server
+      // productionCalculation.service.js's 2026-09-11 note.
+      plannedProductionMin: Math.max(0, workingScheduleMin - num(row.plannedDowntimeMin) - lunchMin),
       lunchMin,
       totalStoppageMin,
       effectiveMcRunTimeMin: rowEffectiveRunMin(row),
@@ -218,7 +222,10 @@ export function computeBatchCalculations(rows, shiftOnTime, shiftOffTime) {
 
   const unreportedTimeMin = round2(Math.max(0, availableWorkingMin - effectiveMcRunTimeMin));
 
-  const availabilityRatio = availableWorkingMin > 0 ? Math.min(1, effectiveMcRunTimeMin / availableWorkingMin) : null;
+  // Standard OEE Availability — Available Working Time ÷ Planned Production
+  // Time (server productionCalculation.service.js's 2026-09-11 note).
+  const plannedProductionMin = round2(perRow.reduce((s, c) => s + c.plannedProductionMin, 0));
+  const availabilityRatio = plannedProductionMin > 0 ? Math.min(1, availableWorkingMin / plannedProductionMin) : null;
 
   // Performance stays anchored to the batch's combined raw Effective M/C
   // Run Time (not Available Working Time) — 2026-09-05 decision.
@@ -238,6 +245,7 @@ export function computeBatchCalculations(rows, shiftOnTime, shiftOffTime) {
     lunchMin:              round2(lunchMin),
     totalStoppageMin:      round2(totalStoppageMin),
     workingScheduleMin:    round2(workingScheduleMin),
+    plannedProductionMin:  round2(plannedProductionMin),
     availableWorkingMin:   round2(availableWorkingMin),
     effectiveMcRunTimeMin: round2(effectiveMcRunTimeMin),
     unreportedTimeMin:     round2(unreportedTimeMin),
@@ -260,15 +268,17 @@ export function aggregateBatchLevelTotals(entries) {
   }
 
   let workingScheduleMin = 0;
+  let plannedProductionMin = 0;
   let availableWorkingMin = 0;
   let effectiveMcRunTimeMin = 0;
   for (const rows of batches.values()) {
     const batchCalc = computeBatchCalculations(rows, rows[0].shiftOnTime, rows[0].shiftOffTime);
     workingScheduleMin += batchCalc.workingScheduleMin || 0;
+    plannedProductionMin += batchCalc.plannedProductionMin || 0;
     if (batchCalc.availableWorkingMin != null) availableWorkingMin += batchCalc.availableWorkingMin;
     effectiveMcRunTimeMin += batchCalc.effectiveMcRunTimeMin || 0;
   }
-  return { workingScheduleMin, availableWorkingMin, effectiveMcRunTimeMin };
+  return { workingScheduleMin, plannedProductionMin, availableWorkingMin, effectiveMcRunTimeMin };
 }
 
 // Mirrors server/utils/oeeAggregate.js's aggregateOee exactly — reduces a set
@@ -293,10 +303,10 @@ export function aggregateOee(entries) {
     sumStdMinutes += (Number(e.processQty) || 0) * (Number(e.standardTimePerPieceMin) || 0);
   }
 
-  const { workingScheduleMin: sumWork, availableWorkingMin: sumAvail, effectiveMcRunTimeMin: sumEffectiveRun } =
+  const { workingScheduleMin: sumWork, plannedProductionMin: sumPlanned, availableWorkingMin: sumAvail, effectiveMcRunTimeMin: sumEffectiveRun } =
     aggregateBatchLevelTotals(entries);
 
-  const availRatio = sumAvail > 0 ? Math.min(100, (sumEffectiveRun / sumAvail) * 100) : 0;
+  const availRatio = sumPlanned > 0 ? Math.min(100, (sumAvail / sumPlanned) * 100) : 0;
   const qualRatio = sumProcess > 0 ? (sumOk / sumProcess) * 100 : 0;
   const perfRatio = sumEffectiveRun > 0 ? (sumStdMinutes / sumEffectiveRun) * 100 : 0;
   const oee = (availRatio / 100) * (perfRatio / 100) * (qualRatio / 100) * 100;
