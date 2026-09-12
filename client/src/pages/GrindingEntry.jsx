@@ -722,6 +722,25 @@ const fmtDelayOrEarly = (startDelayMin, earlyClosedMin, showUnit = true) => {
 
 const sumBy = (arr, getter) => arr.reduce((s, e) => s + (Number(getter(e)) || 0), 0);
 
+// ── Frozen (sticky) LEFT columns ─────────────────────────────────────────
+// Date / Machine / Size (mm) stay pinned against the left edge while the
+// sheet scrolls sideways, so you can always tell which day/machine/size a
+// far-right calculated column belongs to — mirroring the Daily OEE %/Actions
+// columns already pinned against the right edge.
+//
+// The widths MUST be fixed and identical between each column's <th> and its
+// <td>, because every column's `left` offset is the running sum of the
+// widths before it (0 → 100 → 100+180): a column sized by its content would
+// drift out of step with that offset and leave a gap or overlap its
+// neighbour. Backgrounds must also be fully OPAQUE (no /60-style alpha) —
+// the rest of the row scrolls underneath these cells, and a translucent
+// background lets that scrolled-away text show through (same reason
+// plainBgSolid exists for the sticky Actions column).
+const FROZEN_DATE_COL    = "sticky left-0 w-[100px] min-w-[100px] max-w-[100px]";
+const FROZEN_MACHINE_COL = "sticky left-[100px] w-[180px] min-w-[180px] max-w-[180px]";
+// Last frozen column carries the drop shadow marking the freeze line.
+const FROZEN_SIZE_COL    = "sticky left-[280px] w-[116px] min-w-[116px] max-w-[116px] shadow-[4px_0_10px_rgba(0,0,0,0.06)]";
+
 // Every StackedCell in a grouped row renders as its own independent div
 // stack (see StackedCell) — there's no real shared-height grid tying a
 // row's cells together the way native <tr> rows do, but since no stacked
@@ -1680,9 +1699,13 @@ const GrindingEntry = () => {
         <table className="w-full text-xs sm:text-sm border-separate border-spacing-0">
           <thead>
             <tr className="bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-left">
-              <th className="sticky top-0 z-20 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Date</th>
-              <th className="sticky top-0 z-20 bg-teal-50 dark:bg-teal-900/30 text-teal-800 dark:text-teal-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Machine</th>
-              <th className="sticky top-0 z-20 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Size (mm)</th>
+              {/* Date / Machine / Size — frozen against the left edge (see
+                  FROZEN_*_COL above) AND against the top, so they hold
+                  their place in both scroll directions. z-40 keeps them
+                  above the plain z-20 headers they scroll under. */}
+              <th className={`sticky top-0 z-40 ${FROZEN_DATE_COL} bg-indigo-50 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700`}>Date</th>
+              <th className={`sticky top-0 z-40 ${FROZEN_MACHINE_COL} bg-teal-50 dark:bg-teal-950 text-teal-800 dark:text-teal-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700`}>Machine</th>
+              <th className={`sticky top-0 z-40 ${FROZEN_SIZE_COL} bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700`}>Size (mm)</th>
               <th className="sticky top-0 z-20 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Thickness (mm)</th>
               <th className="sticky top-0 z-20 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Std. Time (min)</th>
               <th className="sticky top-0 z-20 bg-fuchsia-50 dark:bg-fuchsia-900/30 text-fuchsia-800 dark:text-fuchsia-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Operator</th>
@@ -1876,9 +1899,12 @@ const GrindingEntry = () => {
               return (
               <tr key={group.map((e) => e._id).join("-")} className="border-b border-slate-300 dark:border-slate-700">
                 {/* Shared across the whole batch — Date/Machine/Operator/Shift are picked once per submission */}
-                <td className="bg-indigo-50/60 dark:bg-indigo-900/15 px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-indigo-800 dark:text-indigo-300 font-medium">{fmtDate(first.date)}</td>
-                <td className="bg-teal-50/60 dark:bg-teal-900/15 px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-teal-800 dark:text-teal-300 font-medium">{mName || "—"}</td>
-                <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.sizeWidthMm}×${e.sizeHeightMm}`)} />
+                {/* Frozen left columns — opaque backgrounds (the rest of the
+                    row scrolls underneath them) and truncate, since a long
+                    machine name can't widen a fixed-width frozen column. */}
+                <td className={`${FROZEN_DATE_COL} z-10 bg-indigo-50 dark:bg-indigo-950 px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-indigo-800 dark:text-indigo-300 font-medium`}>{fmtDate(first.date)}</td>
+                <td className={`${FROZEN_MACHINE_COL} z-10 bg-teal-50 dark:bg-teal-950 px-3 py-2 whitespace-nowrap truncate border-r border-b border-slate-300 dark:border-slate-700 text-teal-800 dark:text-teal-300 font-medium`} title={mName || ""}>{mName || "—"}</td>
+                <StackedCell className={`${FROZEN_SIZE_COL} z-10 ${plainBgSolid} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.sizeWidthMm}×${e.sizeHeightMm}`)} />
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) => `${e.thicknessMm}`)} />
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={group.map((e) =>fmt(e.standardTimePerPieceMin, "min", false))} />
                 <td className="bg-fuchsia-50/60 dark:bg-fuchsia-900/15 px-3 py-2 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-fuchsia-800 dark:text-fuchsia-300 font-medium">{first.operator?.name || "—"}</td>
