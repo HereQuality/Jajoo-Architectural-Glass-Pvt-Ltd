@@ -118,29 +118,43 @@ const RangeFooter = ({ picking, hasRange, onPick, onClear }) => (
  */
 const DateRangePicker = ({ from, to, onChange }) => {
   const [open, setOpen] = useState(false);
+  // The first-clicked day of an in-progress range pick — deliberately kept
+  // OUT of `from`/`to` (the committed filter). react-datepicker's own
+  // selectsRange logic only treats a click as "extend the range" when its
+  // startDate prop is set and endDate is null; the moment both are set (a
+  // "complete" range — even a single day where start===end) it treats ANY
+  // further click as a brand-new pick instead of a second endpoint. So a
+  // single click applies immediately as a same-day filter (from=to=that
+  // day, reported to the parent right away below) while the calendar
+  // itself keeps seeing endDate=null via `pickAnchor` — meaning a second
+  // click still extends into a real range instead of restarting.
+  const [pickAnchor, setPickAnchor] = useState(null);
   const hasRange = !!(from || to);
-  const picking = !!from && !to;
+  const picking = !!pickAnchor;
 
-  const handleChange = ([start, end]) => onChange({ from: toDateStr(start), to: toDateStr(end) });
+  const handleChange = ([start, end]) => {
+    if (start && !end) {
+      setPickAnchor(start);
+      onChange({ from: toDateStr(start), to: toDateStr(start) });
+      return;
+    }
+    setPickAnchor(null);
+    onChange({ from: toDateStr(start), to: toDateStr(end) });
+  };
+
+  const commit = (range) => {
+    setPickAnchor(null);
+    onChange(range);
+  };
 
   return (
     <div className="flex items-center gap-1 min-w-0">
       <ReactDatePicker
         selectsRange
-        startDate={toDateObj(from)}
-        endDate={toDateObj(to)}
+        startDate={pickAnchor || toDateObj(from)}
+        endDate={pickAnchor ? null : toDateObj(to)}
         onChange={handleChange}
-        // Picking just a start date and walking away (outside click,
-        // Escape, tabbing off) used to leave the range half-open — most
-        // callers treat fromDate-without-toDate as "no filter yet" rather
-        // than "one specific day", so defaulting toDate to fromDate here
-        // makes a single click a complete filter on its own, while the
-        // popup staying open after that first click still lets a real
-        // range be picked before closing.
-        onCalendarClose={() => {
-          setOpen(false);
-          if (from && !to) handleChange([toDateObj(from), toDateObj(from)]);
-        }}
+        onCalendarClose={() => { setOpen(false); setPickAnchor(null); }}
         onCalendarOpen={() => setOpen(true)}
         customInput={<PillTrigger from={from} to={to} open={open} />}
         wrapperClassName="w-full"
@@ -155,20 +169,20 @@ const DateRangePicker = ({ from, to, onChange }) => {
         showMonthDropdown
         showYearDropdown
         dropdownMode="select"
-        openToDate={toDateObj(from) || undefined}
+        openToDate={(pickAnchor || toDateObj(from)) || undefined}
         autoComplete="off"
       >
         <RangeFooter
           picking={picking}
           hasRange={hasRange}
-          onPick={onChange}
-          onClear={() => onChange({ from: "", to: "" })}
+          onPick={commit}
+          onClear={() => commit({ from: "", to: "" })}
         />
       </ReactDatePicker>
       {hasRange && (
         <button
           type="button"
-          onClick={() => onChange({ from: "", to: "" })}
+          onClick={() => commit({ from: "", to: "" })}
           title="Clear date range"
           className="shrink-0 p-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] text-slate-500 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:border-slate-400 dark:hover:border-slate-600 transition-colors"
         >
