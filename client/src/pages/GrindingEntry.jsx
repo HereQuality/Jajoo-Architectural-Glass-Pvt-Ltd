@@ -894,6 +894,7 @@ const GrindingEntry = () => {
   const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
+  const [goToPageInput, setGoToPageInput] = useState("");
   const [entries, setEntries] = useState([]);
   const [loadingSheet, setLoadingSheet] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -1604,6 +1605,12 @@ const GrindingEntry = () => {
   const UNIT_BY_CALC_KEY = useMemo(() => Object.fromEntries(CALC_COLUMNS.map((c) => [c.key, c.unit])), []);
   const err = (name) => submitted && formErrors[name] ? formErrors[name] : null;
   const rowErr = (rowIndex, name) => submitted && rowErrors[rowIndex]?.[name] ? rowErrors[rowIndex][name] : null;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const handleGoToPage = () => {
+    const n = parseInt(goToPageInput, 10);
+    if (!isNaN(n)) setPage(Math.min(totalPages, Math.max(1, n)));
+    setGoToPageInput("");
+  };
 
   return (
     <div className="w-full">
@@ -1672,15 +1679,51 @@ const GrindingEntry = () => {
 
       {/* Sheet table — header row & OEE column stay locked in place while scrolling, like an Excel freeze-pane */}
       <div className="bg-white dark:bg-[#1a1a1a] rounded-2xl border border-slate-200 shadow-sm">
-        <div className="flex items-center gap-4 px-3 pt-2 pb-1 text-[11px] text-slate-500">
-          <span className="inline-flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-sm bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 inline-block" /> Entered data
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-sm bg-violet-100 dark:bg-violet-900\/50 border border-violet-300 dark:border-violet-700 inline-block" /> Calculated (click <Eye className="w-3 h-3 inline" /> for formula)
-          </span>
-        </div>
-        
+        {!isSearching && totalCount > 0 && (
+          <div className="flex items-center justify-between gap-3 px-3 pt-2 pb-2 text-xs text-slate-600 dark:text-slate-300 flex-wrap">
+            <span className="text-slate-500">
+              Page {page} of {totalPages}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1 || loadingSheet}
+                className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] px-3 py-1.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+              >
+                Previous
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((p) => (p * PAGE_SIZE < totalCount ? p + 1 : p))}
+                disabled={page * PAGE_SIZE >= totalCount || loadingSheet}
+                className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] px-3 py-1.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+              >
+                Next
+              </button>
+              <form onSubmit={(e) => { e.preventDefault(); handleGoToPage(); }} className="flex items-center gap-1.5">
+                <span className="text-slate-500">Go to</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  value={goToPageInput}
+                  onChange={(e) => setGoToPageInput(e.target.value)}
+                  placeholder={String(page)}
+                  className="w-16 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] px-2 py-1 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
+                />
+                <button
+                  type="submit"
+                  disabled={loadingSheet}
+                  className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] px-3 py-1.5 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                >
+                  Go
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
         {/* Top Scrollbar — synced with table below */}
         <div
           ref={topScrollRef}
@@ -2093,7 +2136,7 @@ const GrindingEntry = () => {
               Previous
             </button>
             <span className="text-xs text-slate-500">
-              Page {page} of {Math.max(1, Math.ceil(totalCount / PAGE_SIZE))}
+              Page {page} of {totalPages}
             </span>
             <button
               type="button"

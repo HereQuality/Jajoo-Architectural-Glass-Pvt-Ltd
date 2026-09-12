@@ -162,8 +162,10 @@
   background-color: #3b82f6 !important; /* Blue hover */
   color: #ffffff !important;
 }
-.dark .react-datepicker__day--selected {
-  background-color: #2563eb !important; /* Blue selected */
+.dark .react-datepicker__day--selected,
+.dark .react-datepicker__day--in-range,
+.dark .react-datepicker__day--in-selecting-range {
+  background-color: #2563eb !important; /* Blue selected / range */
   color: #ffffff !important;
 }
 .dark .react-datepicker__day--keyboard-selected {

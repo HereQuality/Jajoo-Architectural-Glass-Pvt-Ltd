@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useContext, useMemo } from "react";
-import { Factory, TrendingUp, AlertCircle, Clock, Activity, BarChart2, Calendar, Download, X } from "lucide-react";
+import { Factory, TrendingUp, AlertCircle, Clock, Activity, BarChart2, Download, X } from "lucide-react";
 import { toast as toastify } from "react-toastify";
 import { useAlert } from "../context/AlertContext";
 import { ThemeContext } from "../context/ThemeContext";
@@ -8,6 +8,8 @@ import { downloadOeeReport, downloadDailyOeeTrendReport, downloadDashboardOeeRep
 import { useMachines } from "../hooks/useMachines";
 import { useProcesses } from "../hooks/useProcesses";
 import DatePicker from "../Components/Common/DatePicker";
+import DateRangePicker from "../Components/Common/DateRangePicker";
+import FilterBar from "../Components/Common/FilterBar";
 import { aggregateOee } from "../utils/productionCalculation";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, ReferenceLine, Cell, LabelList
@@ -178,9 +180,31 @@ export default function Dashboard() {
       .sort((a,b) => a.realDate - b.realDate)
       .map(d => ({
         date: d.dateStr,
-        OEE: Number(aggregateOee(d.rows).oee.toFixed(2))
+        OEE: Number(aggregateOee(d.rows).oee.toFixed(2)),
+        // Kept for the click-through drilldown (per-machine breakdown) below
+        // — Recharts ignores extra keys on a bar's data point, so this rides
+        // along for free without affecting the chart itself.
+        rows: d.rows,
       }));
   }, [entries, chartMonth]);
+
+  // ── Daily OEE Trend drilldown — clicking a bar breaks that one day down
+  // by machine (Power BI-style "explore" click), instead of only showing
+  // the day's single combined OEE%.
+  const [drilldownDay, setDrilldownDay] = useState(null);
+  const drilldownMachines = useMemo(() => {
+    if (!drilldownDay) return [];
+    const byMachine = {};
+    drilldownDay.rows.forEach((e) => {
+      const id = e.machine?._id || "unknown";
+      const name = e.machine?.machineName || "Unknown Machine";
+      if (!byMachine[id]) byMachine[id] = { id, name, rows: [] };
+      byMachine[id].rows.push(e);
+    });
+    return Object.values(byMachine)
+      .map((m) => ({ id: m.id, name: m.name, ...aggregateOee(m.rows) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [drilldownDay]);
 
   // ── Efficiency Report Data (Image 3 logic) ──
   const reportData = useMemo(() => {
@@ -243,44 +267,14 @@ export default function Dashboard() {
 
   return (
     <div className="max-w-[1400px] mx-auto space-y-6">
-      {/* Header & Global Filters */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
-            <BarChart2 className="w-6 h-6 text-brand-600 dark:text-brand-400" />
-            Dashboard
-          </h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">OEE Analytics & Efficiency Reports</p>
-        </div>
-        
-        <div className="flex flex-wrap items-center gap-3">
-          <select
-            value={selectedProcess}
-            onChange={handleProcessChange}
-            className={`w-full sm:w-auto ${inputStyle}`}
-          >
-            <option value="all">All Processes</option>
-            {processes.map(p => <option key={p._id} value={p._id}>{p.processName}</option>)}
-          </select>
-          <select
-            value={selectedMachine}
-            onChange={e => setSelectedMachine(e.target.value)}
-            className={`w-full sm:w-auto ${inputStyle}`}
-          >
-            <option value="all">All Machines</option>
-            {filteredMachines.map(m => <option key={m._id} value={m._id}>{m.machineName}</option>)}
-          </select>
-          <button
-            onClick={clearAllFilters}
-            disabled={!isAnyFilterActive}
-            title="Clear every filter on this page — Process, Machine, date range, and chart month"
-            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-medium px-3 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent w-full sm:w-auto"
-          >
-            <X className="w-4 h-4" />
-            Clear Filter
-          </button>
-        </div>
-      </div>
+      {/* Header — just the page title now; Process/Machine/Clear Filter live
+          in the Efficiency Report card below, alongside the date range they
+          actually filter, instead of floating up here with nothing next to
+          them. */}
+      <h1 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+        <BarChart2 className="w-6 h-6 text-brand-600 dark:text-brand-400" />
+        Dashboard
+      </h1>
 
       {loading ? (
         <div className="h-64 flex items-center justify-center text-slate-400">Loading metrics...</div>
@@ -291,41 +285,69 @@ export default function Dashboard() {
           <div className={cardStyle}>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 pb-4 border-b border-slate-200 dark:border-slate-800 gap-4">
               <h2 className={titleStyle} style={{marginBottom: 0}}>Efficiency Report (OEE)</h2>
-              <div className="flex flex-wrap items-center gap-2">
-                <Calendar className="w-4 h-4 text-slate-500" />
-                <span className="text-sm text-slate-600 dark:text-slate-300 font-medium mr-1">From:</span>
-                <div className="w-40">
-                  <DatePicker
-                    name="reportFrom"
-                    value={reportFrom}
-                    onChange={e => setReportFrom(e.target.value)}
+              <FilterBar
+                hasActiveFilters={isAnyFilterActive}
+                onClear={clearAllFilters}
+                actions={
+                  <>
+                    <button
+                      onClick={runQuickDownload}
+                      disabled={downloadingQuick}
+                      title="Download today's Efficiency Report PDF — every machine, zero-filled if no entries today (always today's date; ignores the From/To range and the Process/Machine filters above)"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors disabled:opacity-60"
+                    >
+                      <Download className="w-4 h-4" />
+                      {downloadingQuick ? "Downloading…" : "Download Today's PDF"}
+                    </button>
+                    <button
+                      onClick={() => setShowCustomReport(true)}
+                      title="Build a custom report (date range, machine/process, columns)"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 transition-colors"
+                    >
+                      Custom Report…
+                    </button>
+                  </>
+                }
+              >
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Process</label>
+                  <select
+                    value={selectedProcess}
+                    onChange={handleProcessChange}
+                    className={`w-full ${inputStyle}`}
+                  >
+                    <option value="all">All Processes</option>
+                    {processes.map(p => <option key={p._id} value={p._id}>{p.processName}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Machine</label>
+                  <select
+                    value={selectedMachine}
+                    onChange={e => setSelectedMachine(e.target.value)}
+                    className={`w-full ${inputStyle}`}
+                  >
+                    <option value="all">All Machines</option>
+                    {filteredMachines.map(m => <option key={m._id} value={m._id}>{m.machineName}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Date Range</label>
+                  <DateRangePicker
+                    from={reportFrom}
+                    to={reportTo}
+                    onChange={({ from, to }) => {
+                      // The report always needs a real range to filter
+                      // by — clearing the picker resets to today rather
+                      // than leaving it blank (which would match zero
+                      // entries, see reportData's date filter above).
+                      if (!from && !to) { setReportFrom(todayStr()); setReportTo(todayStr()); return; }
+                      setReportFrom(from);
+                      setReportTo(to);
+                    }}
                   />
                 </div>
-                <span className="text-sm text-slate-600 dark:text-slate-300 font-medium">To:</span>
-                <div className="w-40">
-                  <DatePicker
-                    name="reportTo"
-                    value={reportTo}
-                    onChange={e => setReportTo(e.target.value)}
-                  />
-                </div>
-                <button
-                  onClick={runQuickDownload}
-                  disabled={downloadingQuick}
-                  title="Download today's Efficiency Report PDF — every machine, zero-filled if no entries today (always today's date; ignores the From/To range and the Process/Machine filters above)"
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors disabled:opacity-60"
-                >
-                  <Download className="w-4 h-4" />
-                  {downloadingQuick ? "Downloading…" : "Download Today's PDF"}
-                </button>
-                <button
-                  onClick={() => setShowCustomReport(true)}
-                  title="Build a custom report (date range, machine/process, columns)"
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 transition-colors"
-                >
-                  Custom Report…
-                </button>
-              </div>
+              </FilterBar>
             </div>
 
             {/* Stat cards — grid instead of a fixed-width table, so it stacks
@@ -368,7 +390,7 @@ export default function Dashboard() {
 
           {/* Chart Section */}
           <div className={cardStyle}>
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-1">
               <h2 className={titleStyle} style={{marginBottom: 0}}>Daily OEE Trend</h2>
               <div className="flex items-center gap-3">
 
@@ -389,6 +411,9 @@ export default function Dashboard() {
                 </button>
               </div>
             </div>
+            {trendData.length > 0 && (
+              <p className="text-xs text-slate-400 dark:text-slate-500 mb-3">Click a bar to see that day's OEE broken down by machine.</p>
+            )}
 
             {trendData.length === 0 ? (
               <div className="h-72 flex flex-col items-center justify-center text-slate-400 bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-dashed border-slate-300 dark:border-slate-700">
@@ -423,7 +448,13 @@ export default function Dashboard() {
 
                     <ReferenceLine y={75} stroke="#dc2626" strokeWidth={2} label={{ position: 'insideTopRight', value: 'Target 75)', fill: '#dc2626', fontSize: 12 }} />
 
-                    <Bar dataKey="OEE" fill="#1f77b4" maxBarSize={50}>
+                    <Bar
+                      dataKey="OEE"
+                      fill="#1f77b4"
+                      maxBarSize={50}
+                      cursor="pointer"
+                      onClick={(data) => setDrilldownDay(data)}
+                    >
                        <LabelList dataKey="OEE" position="top" formatter={(val) => `${val}%`} style={{ fill: isDarkMode ? '#cbd5e1' : '#334155', fontSize: 11, fontWeight: 600 }} />
                        {trendData.map((entry, index) => (
                          <Cell key={`cell-${index}`} fill="#1f77b4" />
@@ -446,9 +477,81 @@ export default function Dashboard() {
           onClose={() => setShowCustomReport(false)}
         />
       )}
+
+      {drilldownDay && (
+        <DailyOeeDrilldownModal
+          day={drilldownDay}
+          machines={drilldownMachines}
+          onClose={() => setDrilldownDay(null)}
+        />
+      )}
     </div>
   );
 }
+
+// ── Daily OEE Trend drilldown modal — the per-machine breakdown for one
+// day, opened by clicking that day's bar in the trend chart. Mirrors the
+// Efficiency Report card's own OEE%/Availability/Quality/Performance
+// vocabulary, just one row per machine instead of one combined total.
+const DailyOeeDrilldownModal = ({ day, machines, onClose }) => {
+  const pct = (n) => `${n.toFixed(2)}%`;
+  const overall = machines.reduce(
+    (acc, m) => ({ processQty: acc.processQty + m.processQty, okQty: acc.okQty + m.okQty }),
+    { processQty: 0, okQty: 0 }
+  );
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900 dark:text-white">Machine-wise OEE — {day.date}</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{machines.length} machine{machines.length === 1 ? "" : "s"} ran that day · {overall.processQty} qty produced, {overall.okQty} OK</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 overflow-y-auto">
+          {machines.length === 0 ? (
+            <p className="text-sm text-slate-400 text-center py-8">No entries found for this day.</p>
+          ) : (
+            <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-left">
+                    <th className="px-3 py-2 font-semibold">Machine</th>
+                    <th className="px-3 py-2 font-semibold text-right">Qty</th>
+                    <th className="px-3 py-2 font-semibold text-right">OK Qty</th>
+                    <th className="px-3 py-2 font-semibold text-right">Availability</th>
+                    <th className="px-3 py-2 font-semibold text-right">Quality</th>
+                    <th className="px-3 py-2 font-semibold text-right">Performance</th>
+                    <th className="px-3 py-2 font-semibold text-right">OEE %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {machines.map((m) => (
+                    <tr key={m.id} className="border-t border-slate-200 dark:border-slate-700">
+                      <td className="px-3 py-2 font-medium text-slate-800 dark:text-slate-100">{m.name}</td>
+                      <td className="px-3 py-2 text-right text-slate-600 dark:text-slate-300">{m.processQty}</td>
+                      <td className="px-3 py-2 text-right text-slate-600 dark:text-slate-300">{m.okQty}</td>
+                      <td className="px-3 py-2 text-right text-slate-600 dark:text-slate-300">{pct(m.availRatio)}</td>
+                      <td className="px-3 py-2 text-right text-slate-600 dark:text-slate-300">{pct(m.qualRatio)}</td>
+                      <td className="px-3 py-2 text-right text-slate-600 dark:text-slate-300">{pct(m.perfRatio)}</td>
+                      <td className="px-3 py-2 text-right font-semibold text-brand-600 dark:text-brand-400">{pct(m.oee)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 // ── Custom Report modal: date range + machine/process + column picker ──────
 const CustomReportModal = ({ machines, processes, defaultFrom, defaultTo, onClose }) => {
