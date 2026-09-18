@@ -557,7 +557,9 @@ exports.downloadGrindingEfficiencyPdf = async (req, res) => {
 
 exports.listProductionEntries = async (req, res) => {
   try {
-    const { machine, process, from, to, skip = 0, per_page = 50 } = req.query;
+    const { machine, process, from, to, skip = 0, per_page = 50, sort } = req.query;
+    // sort=asc → oldest first (used when a date range is picked); default newest first.
+    const dir = sort === "asc" ? 1 : -1;
     const query = {};
     const machineFilter = await resolveMachineFilter({ machine, process });
     if (machineFilter !== undefined) query.machine = machineFilter;
@@ -570,7 +572,7 @@ exports.listProductionEntries = async (req, res) => {
       ProductionEntry.countDocuments(query),
       ProductionEntry.find(query)
         .populate("machine", "machineName machineCode machineOnTime machineOffTime").populate("operator", "name")
-        .sort({ date: -1, createdAt: -1 })
+        .sort({ date: dir, createdAt: dir })
         .skip(parseInt(skip))
         .limit(parseInt(per_page))
         .lean(),

@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useLayoutEffect, useMemo } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback } from "react";
+import ExcelJS from "exceljs";
 import ReactDOM from "react-dom";
 import Select, { components as selectComponents } from "react-select";
 import { Plus, Minus, X, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock, ChevronRight, ChevronDown, ChevronLeft, CalendarDays } from "lucide-react";
@@ -1075,14 +1076,23 @@ const GrindingEntry = () => {
   // so a plain 20-row page would make search look like it's missing
   // matches that are just on a different page).
   const isSearching = !!debouncedSheetSearch.trim();
+  // Same filters the sheet uses — shared with the Excel export so the
+  // download always matches exactly what the filters select. Once a date
+  // range is picked, entries come back oldest-first (ascending).
+  const buildFilterParams = () => {
+    const params = {};
+    if (activeMachine) params.machine = activeMachine;
+    if (dateFrom) params.from = dateFrom;
+    if (dateTo) params.to = dateTo;
+    if (dateFrom || dateTo) params.sort = "asc";
+    return params;
+  };
   const fetchSheet = () => {
     setLoadingSheet(true);
     const params = isSearching
       ? { per_page: 1000, skip: 0 }
       : { per_page: PAGE_SIZE, skip: (page - 1) * PAGE_SIZE };
-    if (activeMachine) params.machine = activeMachine;
-    if (dateFrom) params.from = dateFrom;
-    if (dateTo) params.to = dateTo;
+    Object.assign(params, buildFilterParams());
     listProductionEntries(params)
       .then((res) => {
         setEntries(res.data?.data || []);
@@ -1100,11 +1110,9 @@ const GrindingEntry = () => {
   // Free-text search across the sheet — matches against every column shown
   // in the table (entered fields AND calculated ones, formatted the same
   // way they're rendered, e.g. "NA" or "55.66"), not just Machine/Operator.
-  const filteredEntries = useMemo(() => {
-    const q = debouncedSheetSearch.trim().toLowerCase();
-    if (!q) return entries;
+  const matchesSearch = useCallback((e, q) => {
     const fmtNum = (n) => (n == null || isNaN(n) ? "NA" : Number(n).toFixed(2));
-    return entries.filter((e) => {
+    {
       const mName = typeof e.machine === "object" ? e.machine?.machineName : machines.find((m) => m._id === e.machine)?.machineName;
       const c = e.calculated || {};
       const haystack = [
@@ -1137,8 +1145,139 @@ const GrindingEntry = () => {
         .join(" ")
         .toLowerCase();
       return haystack.includes(q);
-    });
-  }, [entries, debouncedSheetSearch, machines]);
+    }
+  }, [machines]);
+  const filteredEntries = useMemo(() => {
+    const q = debouncedSheetSearch.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter((e) => matchesSearch(e, q));
+  }, [entries, debouncedSheetSearch, matchesSearch]);
+
+  // Excel export — pulls EVERY entry matching the current Machine / From /
+  // To filters (not just the visible page), applies the same search text,
+  // and keeps the same order as the sheet (ascending when dates are set).
+  const [exporting, setExporting] = useState(false);
+  const exportExcel = async () => {
+    setExporting(true);
+    try {
+      const res = await listProductionEntries({ ...buildFilterParams(), per_page: 100000, skip: 0 });
+      let all = res.data?.data || [];
+      const q = debouncedSheetSearch.trim().toLowerCase();
+      if (q) all = all.filter((e) => matchesSearch(e, q));
+      if (!all.length) { toast.error?.("No entries to export for the selected filters"); return; }
+
+      const dateKey = (e) => (typeof e.date === "string" ? e.date.split("T")[0] : new Date(e.date).toISOString().split("T")[0]);
+      const machineIdOf = (e) => String(typeof e.machine === "object" ? e.machine?._id : e.machine);
+      const machineNameOf = (e) => (typeof e.machine === "object" ? e.machine?.machineName : machines.find((m) => m._id === e.machine)?.machineName) || "";
+      // Daily OEE — same whole-day (Machine + Date) total the sheet shows.
+      const dayGroups = new Map();
+      for (const e of all) {
+        const k = `${dateKey(e)}|${machineIdOf(e)}`;
+        if (!dayGroups.has(k)) dayGroups.set(k, []);
+        dayGroups.get(k).push(e);
+      }
+      const dayCalcs = new Map();
+      for (const [k, rows] of dayGroups) {
+        if (rows.length < 2) continue;
+        const f = rows[0];
+        const on = f.shiftOnTime || (typeof f.machine === "object" ? f.machine?.machineOnTime : null);
+        const off = f.shiftOffTime || (typeof f.machine === "object" ? f.machine?.machineOffTime : null);
+        dayCalcs.set(k, computeBatchCalculations(rows, on, off));
+      }
+      const num = (v) => (v == null || v === "" || isNaN(v) ? null : Number(v));
+      const round = (v, d = 2) => (num(v) == null ? null : Number(Number(v).toFixed(d)));
+
+      const columns = [
+        { header: "Date", key: "date", width: 11 },
+        { header: "Machine", key: "machine", width: 24 },
+        { header: "Operator", key: "operator", width: 20 },
+        { header: "Size (mm)", key: "size", width: 13 },
+        { header: "Thickness (mm)", key: "thicknessMm", width: 12 },
+        { header: "Std. Time (min)", key: "standardTimePerPieceMin", width: 12 },
+        { header: "M/C Start", key: "mcStartTime", width: 10 },
+        { header: "M/C Off", key: "mcOffTime", width: 10 },
+        { header: "Shift On", key: "shiftOn", width: 10 },
+        { header: "Shift Off", key: "shiftOff", width: 10 },
+        { header: "Overtime (min)", key: "overtimeMin", width: 12 },
+        { header: "Start Delay (min)", key: "startDelayMin", width: 12 },
+        { header: "Early Closed (min)", key: "earlyClosedMin", width: 12 },
+        { header: "Production Qty", key: "processQty", width: 12 },
+        { header: "OK Qty", key: "okQty", width: 10 },
+        { header: "Rejected Qty", key: "rejectedQty", width: 11 },
+        ...REJECTION_FIELDS.map((f) => ({ header: f.label, key: f.key, width: 14 })),
+        ...STOPPAGE_FIELDS.map((f) => ({ header: f.label, key: f.key, width: 16 })),
+        { header: "Lunch (min)", key: "lunchMin", width: 10 },
+        { header: "Remark", key: "othersRemark", width: 24 },
+        ...CALC_COLUMNS.map((c) => ({ header: c.label, key: c.key, width: 16 })),
+        { header: "OEE %", key: "oeePercent", width: 10 },
+        { header: "Daily Availability", key: "dayAvail", width: 13 },
+        { header: "Daily Performance", key: "dayPerf", width: 13 },
+        { header: "Daily Quality", key: "dayQual", width: 12 },
+        { header: "Daily OEE %", key: "dayOee", width: 12 },
+      ];
+
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Grinding Data", { views: [{ state: "frozen", xSplit: 2, ySplit: 1 }] });
+      ws.columns = columns;
+      for (const e of all) {
+        const c = e.calculated || {};
+        const day = dayCalcs.get(`${dateKey(e)}|${machineIdOf(e)}`);
+        const row = {
+          date: fmtDate(e.date),
+          machine: machineNameOf(e),
+          operator: e.operator?.name || "",
+          size: e.sizeWidthMm != null && e.sizeHeightMm != null ? `${e.sizeWidthMm}x${e.sizeHeightMm}` : "",
+          thicknessMm: num(e.thicknessMm),
+          standardTimePerPieceMin: num(e.standardTimePerPieceMin),
+          mcStartTime: e.mcStartTime || "",
+          mcOffTime: (e.mcOffTime || "") + (e.mcOffNextDay ? " (+1d)" : ""),
+          shiftOn: e.shiftOnTime || (typeof e.machine === "object" ? e.machine?.machineOnTime : "") || "",
+          shiftOff: e.shiftOffTime || (typeof e.machine === "object" ? e.machine?.machineOffTime : "") || "",
+          overtimeMin: num(c.overtimeMin),
+          startDelayMin: num(c.startDelayMin),
+          earlyClosedMin: num(c.earlyClosedMin),
+          processQty: num(e.processQty),
+          okQty: num(e.okQty),
+          rejectedQty: num(e.rejectedQty),
+          lunchMin: num(c.lunchMin),
+          othersRemark: e.othersRemark || "",
+          oeePercent: round(c.oeePercent),
+          dayAvail: day ? round(day.availabilityRatio) : null,
+          dayPerf: day ? round(day.performanceRatio) : null,
+          dayQual: day ? round(day.qualityRatio) : null,
+          dayOee: day ? round(day.oeePercent) : null,
+        };
+        for (const f of REJECTION_FIELDS) row[f.key] = num(e[f.key]) ?? 0;
+        for (const f of STOPPAGE_FIELDS) row[f.key] = num(e[f.key]) ?? 0;
+        for (const col of CALC_COLUMNS) row[col.key] = round(c[col.key]);
+        ws.addRow(row);
+      }
+      const header = ws.getRow(1);
+      header.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      header.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E40AF" } };
+      header.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+      header.height = 32;
+      ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const range = dateFrom || dateTo ? `_${dateFrom || "start"}_to_${dateTo || "today"}` : "";
+      const mName = activeMachine ? `_${(machines.find((m) => m._id === activeMachine)?.machineName || "machine").replace(/[^\w-]+/g, "-")}` : "";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `grinding-data${mName}${range}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+      toast.error?.("Failed to export Excel");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Entries saved together from one multi-row "Add Entry" submission share a
   // batchId — group them back into one array so the sheet renders them as a
@@ -1667,6 +1806,10 @@ const GrindingEntry = () => {
           <button onClick={() => setShowEfficiency(true)}
             className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
             <Gauge className="w-4 h-4" /> Efficiency
+          </button>
+          <button onClick={exportExcel} disabled={exporting} title="Download all entries matching the current filters as Excel"
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-[#1a1a1a] hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0 disabled:opacity-60">
+            <Download className="w-4 h-4" /> {exporting ? "Exporting…" : "Export Excel"}
           </button>
           {currentPagePermissions.create && (
             <button onClick={openModal} title="Add a new grinding data entry"
