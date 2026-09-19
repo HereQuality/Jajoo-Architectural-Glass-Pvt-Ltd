@@ -346,8 +346,14 @@ const validateRow = (row, shared) => {
   const rejectionFieldsClean = REJECTION_FIELDS.every((f) => !e[f.key]);
   const rejectedQtyTotal = REJECTION_FIELDS.reduce((s, f) => s + (Number(row[f.key]) || 0), 0);
 
-  if (!e.processQty && !e.okQty && rejectionFieldsClean && oq + rejectedQtyTotal > pq)
-    e.rejectionTotal = `OK Qty + Rejected Qty (${rejectedQtyTotal}, from Rejection Reasons below) cannot exceed Production Qty`;
+  // New entries: Rejection Reasons must account for exactly Production Qty −
+  // OK Qty. Existing entries (loaded for edit, carry __entryId) predate that
+  // rule, so they keep the older "can't exceed" check.
+  if (!e.processQty && !e.okQty && rejectionFieldsClean) {
+    const expected = pq - oq;
+    if (row.__entryId ? rejectedQtyTotal > expected : rejectedQtyTotal !== expected)
+      e.rejectionTotal = `Rejection Reasons must add up to exactly ${expected} (Production Qty − OK Qty) — currently ${rejectedQtyTotal}`;
+  }
 
   for (const f of STOPPAGE_FIELDS) {
     const val = row[f.key];
@@ -1366,10 +1372,9 @@ const GrindingEntry = () => {
   const mcOffDateFor = () => addOneDay(values.date);
 
 
-  // Rejection Reasons share one budget: Production Qty − OK Qty. Each field
-  // is clamped to whatever's left of that budget after every OTHER reason
-  // field, so the running total can never exceed the difference — the user
-  // simply can't type past it instead of finding out only after Save.
+  // Rejection Reasons share one budget: Production Qty − OK Qty. The typed
+  // value is kept as-is (never auto-clamped); going over the budget just pops
+  // a warning, and Save blocks until the total matches exactly.
   const handleRejectionChange = (index, e) => {
     const { name, value } = e.target;
     updateRow(index, (row) => {
@@ -1380,18 +1385,17 @@ const GrindingEntry = () => {
       const othersSum = REJECTION_FIELDS.reduce((s, f) => (f.key === name ? s : s + (Number(row[f.key]) || 0)), 0);
       const maxAllowed = Math.max(0, diff - othersSum);
       const typed = Math.max(0, Math.trunc(Number(value) || 0));
-      const clamped = Math.min(typed, maxAllowed);
       const isOverCap = typed > maxAllowed;
       // Only pop the toast on the rising edge (not already capped) — typing
       // further digits while still over the limit would otherwise fire it
       // again on every keystroke.
       if (isOverCap && !row.__rejCapWarn?.[name]) {
         const fieldLabel = REJECTION_FIELDS.find((f) => f.key === name)?.label || "This field";
-        toast.error?.(`${fieldLabel} can't exceed ${maxAllowed} — that's all that's left of Production Qty − OK Qty after the other rejection reasons already entered.`);
+        toast.error?.(`${fieldLabel} can't be more than ${maxAllowed} — Rejection Reasons must add up to exactly ${diff} (Production Qty − OK Qty).`);
       }
       return {
         ...row,
-        [name]: String(clamped),
+        [name]: value,
         __rejCapWarn: { ...row.__rejCapWarn, [name]: isOverCap },
       };
     });
@@ -1641,6 +1645,9 @@ const GrindingEntry = () => {
     setSubmitted(true);
 
     const firstBadRow = perRowErrors.findIndex((e) => Object.keys(e).length > 0);
+    const rejMismatchRow = perRowErrors.findIndex((e) => e.rejectionTotal);
+    if (rejMismatchRow !== -1)
+      toast.error?.(`Entry ${rejMismatchRow + 1}: ${perRowErrors[rejMismatchRow].rejectionTotal}`);
     if (firstBadRow !== -1) setOpenRowIndex(firstBadRow);
 
     const hasErrors = Object.keys(sharedErrors).length > 0 || firstBadRow !== -1;

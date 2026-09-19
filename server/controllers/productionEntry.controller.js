@@ -31,7 +31,7 @@ const OPTIONAL_MIN_FIELDS = [
   "rawMaterialProblemMin", "noPowerMin", "othersMin",
 ];
 
-async function validatePayload(body) {
+async function validatePayload(body, { isUpdate = false } = {}) {
   const errors = {};
 
   if (!body.machine) errors.machine = "M/C Name is required";
@@ -107,8 +107,11 @@ async function validatePayload(body) {
   const rejectionFieldsClean = REJECTION_QTY_FIELDS.every((k) => !errors[k]);
   if (!errors.processQty && !errors.okQty && rejectionFieldsClean) {
     const rejectedQtyTotal = REJECTION_QTY_FIELDS.reduce((s, k) => s + (Number(body[k]) || 0), 0);
-    if (Number(body.okQty) + rejectedQtyTotal > Number(body.processQty))
-      errors.rejHandlingBreakageQty = "OK Qty + Rejected Qty (from Rejection Reasons) cannot exceed Production Qty";
+    const expected = Number(body.processQty) - Number(body.okQty);
+    // Exact match is required for new entries only; updates to existing
+    // entries (saved before this rule) keep the older "can't exceed" check.
+    if (isUpdate ? rejectedQtyTotal > expected : rejectedQtyTotal !== expected)
+      errors.rejHandlingBreakageQty = `Rejection Reasons must add up to exactly ${expected} (Production Qty − OK Qty) — currently ${rejectedQtyTotal}`;
   }
 
   const st = Number(body.standardTimePerPieceMin);
@@ -371,7 +374,7 @@ exports.createProductionEntry = async (req, res) => {
 exports.updateProductionEntry = async (req, res) => {
   try {
     const { entryId } = req.params;
-    const errors = await validatePayload(req.body);
+    const errors = await validatePayload(req.body, { isUpdate: true });
     if (Object.keys(errors).length > 0)
       return res.status(400).json({ isOk: false, errors, message: "Please fix the highlighted fields" });
 
