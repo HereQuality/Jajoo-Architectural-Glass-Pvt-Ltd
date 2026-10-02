@@ -17,10 +17,13 @@ import {
   getProductionEfficiency, downloadGrindingEfficiencyPdf, getShiftTimeReport,
 } from "../api/productionEntries.api";
 import DatePicker from "../Components/Common/DatePicker";
+import DateRangePicker from "../Components/Common/DateRangePicker";
+import FilterBar from "../Components/Common/FilterBar";
 import TimePicker from "../Components/Common/TimePicker";
 import DeleteModal from "../Components/Common/DeleteModal";
 import { isEntryEditable, parseLocalDate, buildHolidaySet } from "../utils/workingDays";
 import { computeBatchCalculations } from "../utils/productionCalculation";
+import { buildGrindingWorkbook, XLSX_MIME } from "../utils/exportGrindingExcel";
 
 // ── Stoppage fields ───────────────────────────────────────────────────────
 const PAGE_SIZE = 20;
@@ -1139,6 +1142,41 @@ const GrindingEntry = () => {
   };
   useEffect(() => { fetchSheet(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [activeMachine, dateFrom, dateTo, page, debouncedSheetSearch]);
 
+  // Excel export — every entry matching the Machine / From / To filters (not
+  // just the 20 on this page), fetched in chunks, one row per entry.
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const CHUNK = 1000;
+      const params = {};
+      if (activeMachine) params.machine = activeMachine;
+      if (dateFrom) params.from = dateFrom;
+      if (dateTo) params.to = dateTo;
+      const all = [];
+      let total = Infinity;
+      while (all.length < total) {
+        const res = await listProductionEntries({ ...params, per_page: CHUNK, skip: all.length });
+        const batch = res.data?.data || [];
+        total = res.data?.count || 0;
+        if (batch.length === 0) break;
+        all.push(...batch);
+      }
+      if (all.length === 0) {
+        toast.warning?.("No entries to export for the selected filters");
+        return;
+      }
+      const buffer = await buildGrindingWorkbook(all, { rejectionFields: REJECTION_FIELDS, stoppageFields: STOPPAGE_FIELDS });
+      triggerBlobDownload(buffer, `grinding-entries_${dateFrom || "all"}_to_${dateTo || "all"}.xlsx`, XLSX_MIME);
+      toast.success?.(`Exported ${all.length} ${all.length === 1 ? "entry" : "entries"} to Excel`);
+    } catch (err) {
+      console.error(err);
+      toast.error?.("Failed to export Excel");
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
   // Any filter change (machine/date/search) should reset back to page 1 —
   // otherwise a narrower filter could land on a now out-of-range page.
   useEffect(() => { setPage(1); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [activeMachine, dateFrom, dateTo, debouncedSheetSearch]);
@@ -1660,63 +1698,69 @@ const GrindingEntry = () => {
 
   return (
     <div className="w-full">
-      {/* Header + Filters — one line on wide screens, wraps on narrow ones */}
-      <div className="flex flex-wrap items-end justify-between gap-4 mb-3">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="relative w-full sm:w-56">
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Search</label>
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-[34px] -translate-y-1/2 pointer-events-none" />
+      {/* Toolbar — ONE Filters button at the far left (Machine + Date Range
+          live in its panel, same as the Dashboard) so the panel opens from
+          the left edge, then Search, then the page's action buttons pushed
+          to the right. relative z-50 lifts the panel above the sheet's
+          sticky/frozen header cells (z-40). Wraps on narrow screens. */}
+      <div className="relative z-50 flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <FilterBar
+            hasActiveFilters={!!(activeMachine || dateFrom || dateTo)}
+            onClear={() => { setActiveMachine(""); setDateFrom(""); setDateTo(""); }}
+          >
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Machine</label>
+              <select
+                value={activeMachine}
+                onChange={(e) => setActiveMachine(e.target.value)}
+                className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500 dark:text-slate-200"
+              >
+                <option value="">All Machines</option>
+                {machines.map((m) => (
+                  <option key={m._id} value={m._id}>{m.machineName}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Date Range</label>
+              <DateRangePicker
+                from={dateFrom}
+                to={dateTo}
+                onChange={({ from, to }) => { setDateFrom(from || ""); setDateTo(to || ""); }}
+              />
+            </div>
+          </FilterBar>
+          <div className="relative w-full sm:w-64">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={sheetSearch}
               onChange={(e) => setSheetSearch(e.target.value)}
               placeholder="Search this table…"
+              aria-label="Search this table"
               className="w-full bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 rounded-xl pl-9 pr-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
             />
           </div>
-          <div className="w-full sm:w-56">
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Machine</label>
-            <select
-              value={activeMachine}
-              onChange={(e) => setActiveMachine(e.target.value)}
-              className="w-full bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
-            >
-              <option value="">All Machines</option>
-              {machines.map((m) => (
-                <option key={m._id} value={m._id}>{m.machineName}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">From Date</label>
-            <DatePicker name="dateFrom" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} placeholder="Start date" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">To Date</label>
-            <DatePicker name="dateTo" value={dateTo} onChange={(e) => setDateTo(e.target.value)} placeholder="End date" />
-          </div>
-          {(dateFrom || dateTo || sheetSearch || activeMachine) && (
-            <button
-              onClick={() => { setSheetSearch(""); setActiveMachine(""); setDateFrom(""); setDateTo(""); }}
-              className="rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 transition-colors"
-            >
-              Clear Filters
-            </button>
-          )}
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={handleExportExcel} disabled={exportingExcel || loadingSheet}
+            title="Download all entries matching the Machine / date filters as an Excel file"
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed">
+            <Download className="w-4 h-4" /> {exportingExcel ? "Exporting…" : "Export Excel"}
+          </button>
           <button onClick={() => setShowShiftTimeReport(true)}
-            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0">
             <Clock className="w-4 h-4" /> Shift Time Report
           </button>
           <button onClick={() => setShowEfficiency(true)}
-            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0">
             <Gauge className="w-4 h-4" /> Efficiency
           </button>
           {currentPagePermissions.create && (
             <button onClick={openModal} title="Add a new grinding data entry"
-              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0">
               <Plus className="w-4 h-4" /> Add Entry
             </button>
           )}
