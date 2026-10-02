@@ -186,12 +186,28 @@ const ProductionEntrySchema = new mongoose.Schema(
     rawMaterialProblemMin:      { type: Number, default: 0, min: 0, max: 1440 },
     noPowerMin:                 { type: Number, default: 0, min: 0, max: 1440 },
     othersMin:                  { type: Number, default: 0, min: 0, max: 1440 },
-    othersRemark: {
-      type: String,
-      trim: true,
-      maxlength: [300, "Remark cannot exceed 300 characters"],
-      default: "",
-    },
+
+    // ── Optional per-reason remarks (Rejection + Downtime & Stoppage
+    // Reasons). Never required; see REMARK_FIELDS in the controller. ──────
+    ...Object.fromEntries(
+      [
+        "rejScratchesRemark",
+        "rejChippingRemark",
+        "rejCornerBreakageRemark",
+        "rejSizeMismatchRemark",
+        "rejHandlingBreakageRemark",
+        "plannedDowntimeRemark",
+        "noManpowerRemark",
+        "mechanicalBreakdownRemark",
+        "electricalBreakdownRemark",
+        "rawMaterialNotAvailableRemark",
+        "humanErrorStoppageRemark",
+        "changeoverRemark",
+        "rawMaterialProblemRemark",
+        "noPowerRemark",
+        "othersRemark",
+      ].map((k) => [k, { type: String, trim: true, maxlength: [300, "Remark cannot exceed 300 characters"], default: "" }])
+    ),
 
     // ── Server-calculated OEE fields (never set from client) ─────────────
     calculated: {

@@ -26,16 +26,16 @@ import { computeBatchCalculations } from "../utils/productionCalculation";
 const PAGE_SIZE = 20;
 
 const STOPPAGE_FIELDS = [
-  { key: "plannedDowntimeMin",         label: "Planned Downtime (Minutes)" },
-  { key: "noManpowerMin",              label: "No Manpower (Minutes)" },
-  { key: "mechanicalBreakdownMin",     label: "Mechanical Breakdown (Minutes)" },
-  { key: "electricalBreakdownMin",     label: "Electrical Breakdown (Minutes)" },
-  { key: "rawMaterialNotAvailableMin", label: "Raw Material Not Available (Minutes)" },
-  { key: "humanErrorStoppageMin",      label: "Stoppage (Human Error) (Minutes)" },
-  { key: "changeoverMin",              label: "Changeover (Minutes)" },
-  { key: "rawMaterialProblemMin",      label: "Raw Material Problem (Minutes)" },
-  { key: "noPowerMin",                 label: "No Power (Minutes)" },
-  { key: "othersMin",                  label: "Others (Minutes)" },
+  { key: "plannedDowntimeMin", remarkKey: "plannedDowntimeRemark", label: "Planned Downtime (Minutes)" },
+  { key: "noManpowerMin", remarkKey: "noManpowerRemark", label: "No Manpower (Minutes)" },
+  { key: "mechanicalBreakdownMin", remarkKey: "mechanicalBreakdownRemark", label: "Mechanical Breakdown (Minutes)" },
+  { key: "electricalBreakdownMin", remarkKey: "electricalBreakdownRemark", label: "Electrical Breakdown (Minutes)" },
+  { key: "rawMaterialNotAvailableMin", remarkKey: "rawMaterialNotAvailableRemark", label: "Raw Material Not Available (Minutes)" },
+  { key: "humanErrorStoppageMin", remarkKey: "humanErrorStoppageRemark", label: "Stoppage (Human Error) (Minutes)" },
+  { key: "changeoverMin", remarkKey: "changeoverRemark", label: "Changeover (Minutes)" },
+  { key: "rawMaterialProblemMin", remarkKey: "rawMaterialProblemRemark", label: "Raw Material Problem (Minutes)" },
+  { key: "noPowerMin", remarkKey: "noPowerRemark", label: "No Power (Minutes)" },
+  { key: "othersMin", remarkKey: "othersRemark", label: "Others (Minutes)" },
 ];
 
 // ── Rejection reason fields ───────────────────────────────────────────────
@@ -43,12 +43,15 @@ const STOPPAGE_FIELDS = [
 // directly, it's the sum of these (see server/models/ProductionEntry.js and
 // buildData() in the controller, which derive rejectedQty from these keys).
 const REJECTION_FIELDS = [
-  { key: "rejScratchesQty",        label: "Scratches" },
-  { key: "rejChippingQty",         label: "Chipping" },
-  { key: "rejCornerBreakageQty",   label: "Corner Breakage" },
-  { key: "rejSizeMismatchQty",     label: "Size Mis-match" },
-  { key: "rejHandlingBreakageQty", label: "Handling Breakage and Others" },
+  { key: "rejScratchesQty", remarkKey: "rejScratchesRemark", label: "Scratches" },
+  { key: "rejChippingQty", remarkKey: "rejChippingRemark", label: "Chipping" },
+  { key: "rejCornerBreakageQty", remarkKey: "rejCornerBreakageRemark", label: "Corner Breakage" },
+  { key: "rejSizeMismatchQty", remarkKey: "rejSizeMismatchRemark", label: "Size Mis-match" },
+  { key: "rejHandlingBreakageQty", remarkKey: "rejHandlingBreakageRemark", label: "Handling Breakage and Others" },
 ];
+
+// Every reason (rejection + downtime/stoppage) has its own optional remark.
+const REMARK_FIELDS = [...REJECTION_FIELDS, ...STOPPAGE_FIELDS];
 
 
 // ── Calculated (derived) columns shown in the sheet, in order ────────────
@@ -164,9 +167,9 @@ const buildRow = () => ({
   standardTimePerPieceMin: "",
   processQty: "",
   okQty: "",
-  othersRemark: "",
   ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, "0"])),
   ...Object.fromEntries(REJECTION_FIELDS.map((f) => [f.key, "0"])),
+  ...Object.fromEntries([...STOPPAGE_FIELDS, ...REJECTION_FIELDS].map((f) => [f.remarkKey, ""])),
 });
 
 // ── Capacity check helper — mirrors server/services/productionCalculation
@@ -355,9 +358,10 @@ const validateRow = (row, shared) => {
     if (isNaN(n) || n < 0 || n > 1440) e[f.key] = "0–1440 min";
   }
 
-  const othersRemark = (row.othersRemark || "").trim();
-  if (Number(row.othersMin) > 0 && !othersRemark) e.othersRemark = "Remark is required when Others is greater than 0";
-  else if (othersRemark.length > 300) e.othersRemark = "Cannot exceed 300 characters";
+  // Remarks are optional — only the length is checked.
+  for (const f of [...STOPPAGE_FIELDS, ...REJECTION_FIELDS]) {
+    if ((row[f.remarkKey] || "").trim().length > 300) e[f.remarkKey] = "Cannot exceed 300 characters";
+  }
 
   // Capacity check: can't process more pieces than this row's own actual
   // M/C run time (M/C Off − M/C Start) allows at this Standard Time. Only
@@ -1027,8 +1031,50 @@ const GrindingEntry = () => {
     };
   }, [openRemark]);
 
-  const toggleRemark = (id, text, rect) => {
-    setOpenRemark((prev) => (prev && prev.id === id ? null : { id, text, rect }));
+  const toggleRemark = (id, label, text, rect) => {
+    setOpenRemark((prev) => (prev && prev.id === id ? null : { id, label, text, rect }));
+  };
+
+  // Optional remark box shown under each reason's value input in the form.
+  const remarkInput = (row, idx, f, rErr) => (
+    <>
+      <textarea
+        name={f.remarkKey}
+        value={row[f.remarkKey] || ""}
+        onChange={(e) => handleRowChange(idx, e)}
+        maxLength={300}
+        rows={1}
+        placeholder="Remark (optional)"
+        aria-label={`${f.label} remark`}
+        className={cls(rErr(f.remarkKey)) + " resize-none mt-1 !py-1.5 !text-xs"}
+      />
+      {rErr(f.remarkKey) && <p className="text-[10px] text-red-500 mt-0.5">{rErr(f.remarkKey)}</p>}
+    </>
+  );
+
+  // One line of a reason column: the value plus an eye button that opens that
+  // entry's remark for this specific reason (highlighted when one exists).
+  const reasonCellItem = (e, f, valueText) => {
+    const id = `${e._id}:${f.remarkKey}`;
+    const has = !!(e[f.remarkKey] || "").trim();
+    return (
+      <span key={e._id} className="inline-flex items-center gap-1.5">
+        {valueText}
+        <button
+          type="button"
+          onClick={(ev) => {
+            ev.stopPropagation();
+            toggleRemark(id, `Remark — ${f.label}`, e[f.remarkKey], ev.currentTarget.getBoundingClientRect());
+          }}
+          title={has ? "Show remark" : "No remark entered"}
+          className={`p-0.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${
+            openRemark?.id === id ? "text-brand-600" : has ? "text-brand-500" : "text-slate-300 dark:text-slate-600"
+          }`}
+        >
+          <Eye className="w-3.5 h-3.5" />
+        </button>
+      </span>
+    );
   };
 
   const toggleFormula = (key, label, formula, rect) => {
@@ -1122,7 +1168,7 @@ const GrindingEntry = () => {
         ...REJECTION_FIELDS.map((f) => e[f.key]),
         c.workingScheduleMin,
         ...STOPPAGE_FIELDS.map((f) => e[f.key]),
-        e.othersRemark, // Remark
+        ...REMARK_FIELDS.map((f) => e[f.remarkKey]),
         c.totalStoppageMin,
         fmtNum(c.availableWorkingMin),
         fmtNum(c.idealProductionQty),
@@ -1410,9 +1456,9 @@ const GrindingEntry = () => {
       standardTimePerPieceMin: e.standardTimePerPieceMin || "",
       processQty: e.processQty || "0",
       okQty: e.okQty || "0",
-      othersRemark: e.othersRemark || "",
       ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, String(e[f.key] || "0")])),
       ...Object.fromEntries(REJECTION_FIELDS.map((f) => [f.key, String(e[f.key] || "0")])),
+      ...Object.fromEntries(REMARK_FIELDS.map((f) => [f.remarkKey, e[f.remarkKey] || ""])),
     }]);
     setRowErrors([{}]);
     setFormErrors({});
@@ -1827,29 +1873,23 @@ const GrindingEntry = () => {
                     sticky="sticky top-0" extraClass="border-b"
                     expandable={i === 0} expanded={showStoppageDetails} onToggleExpand={toggleStoppageDetails}
                   />
-                  {i === 0 && showStoppageDetails && STOPPAGE_FIELDS.slice(1).map((f) => (
+                  {i === 0 && showStoppageDetails && STOPPAGE_FIELDS.slice(1).map((f, j, arr) => (
                     <th key={f.key} className="sticky top-0 z-20 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">
-                      {f.label}
-                    </th>
-                  ))}
-                  {/* Remark — moved inside the collapsed Downtime & Stoppage
-                      group, right after Others (Minutes). Now the true last
-                      column of the group, so the collapse chevron lives here. */}
-                  {i === 0 && showStoppageDetails && (
-                    <th className="sticky top-0 z-20 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">
                       <span className="inline-flex items-center gap-1">
-                        Remark
-                        <button
-                          type="button"
-                          onClick={() => setShowStoppageDetails(false)}
-                          title="Collapse Downtime & Stoppage Reasons"
-                          className="flex items-center justify-center rounded bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 shrink-0"
-                        >
-                          <ChevronLeft className="w-3.5 h-3.5" />
-                        </button>
+                        {f.label}
+                        {j === arr.length - 1 && (
+                          <button
+                            type="button"
+                            onClick={() => setShowStoppageDetails(false)}
+                            title="Collapse Downtime & Stoppage Reasons"
+                            className="flex items-center justify-center rounded bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 shrink-0"
+                          >
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </span>
                     </th>
-                  )}
+                  ))}
                 </React.Fragment>
               ))}
 
@@ -1894,7 +1934,7 @@ const GrindingEntry = () => {
           </thead>
           <tbody>
             {filteredEntries.length === 0 && (
-              <tr><td colSpan={14 + 1 + 1 + (showStoppageDetails ? STOPPAGE_FIELDS.length : 0) + (showRejectionDetails ? REJECTION_FIELDS.length : 0) + 1 + 5 + 4 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
+              <tr><td colSpan={14 + 1 + 1 + (showStoppageDetails ? STOPPAGE_FIELDS.length - 1 : 0) + (showRejectionDetails ? REJECTION_FIELDS.length : 0) + 1 + 5 + 4 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
                 {loadingSheet ? "Loading…" : sheetSearch ? "No entries match your search." : "No entries for this machine yet."}
               </td></tr>
             )}
@@ -1979,7 +2019,7 @@ const GrindingEntry = () => {
                 {/* Individual Rejection Reason values — collapsed by default */}
                 {showRejectionDetails && REJECTION_FIELDS.map((f) => (
                   <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
-                    group.map((e) => fmtQty(e[f.key] || 0, false))
+                    group.map((e) => reasonCellItem(e, f, fmtQty(e[f.key] || 0, false)))
                   } />
                 ))}
 
@@ -1990,7 +2030,7 @@ const GrindingEntry = () => {
                     collapsed group. Lunch sits between it and Total
                     Stoppage (both feed into Total Stoppage's sum). */}
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
-                  group.map((e) => fmt(e[STOPPAGE_FIELDS[0].key], "min", false))
+                  group.map((e) => reasonCellItem(e, STOPPAGE_FIELDS[0], fmt(e[STOPPAGE_FIELDS[0].key], "min", false)))
                 } />
                 {/* Lunch — the configured window's duration or 0, see
                     LUNCH_FORMULA. Already folded into Total Stoppage; shown
@@ -2005,30 +2045,9 @@ const GrindingEntry = () => {
                 <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).totalStoppageMin, UNIT_BY_CALC_KEY.totalStoppageMin, false))} />
                 {showStoppageDetails && STOPPAGE_FIELDS.slice(1).map((f) => (
                   <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
-                    group.map((e) => fmt(e[f.key], "min", false))
+                    group.map((e) => reasonCellItem(e, f, fmt(e[f.key], "min", false)))
                   } />
                 ))}
-                {/* Remark — moved inside the collapsed Downtime & Stoppage
-                    group, right after Others (Minutes). "eye" opens a
-                    popover with the Others-downtime note. */}
-                {showStoppageDetails && (
-                  <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-center`} items={group.map((e) => (
-                    <button
-                      key={e._id}
-                      type="button"
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        const rect = ev.currentTarget.getBoundingClientRect();
-                        toggleRemark(e._id, e.othersRemark, rect);
-                      }}
-                      title="Show remark"
-                      className={`p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${openRemark?.id === e._id ? "text-brand-600" : "text-slate-400"}`}
-                    >
-                      <Eye className="w-4 h-4" />
-                    </button>
-                  ))} />
-                )}
-
                 {/* Available Working Time */}
                 <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).availableWorkingMin, UNIT_BY_CALC_KEY.availableWorkingMin, false))} />
                 {/* Ideal Production */}
@@ -2152,7 +2171,7 @@ const GrindingEntry = () => {
 
       <FormulaPopover info={openFormula} onClose={() => setOpenFormula(null)} />
       <FormulaPopover
-        info={openRemark ? { rect: openRemark.rect, label: "Remark", formula: openRemark.text?.trim() || "No remark entered." } : null}
+        info={openRemark ? { rect: openRemark.rect, label: openRemark.label || "Remark", formula: openRemark.text?.trim() || "No remark entered." } : null}
         onClose={() => setOpenRemark(null)}
       />
 
@@ -2435,6 +2454,7 @@ const GrindingEntry = () => {
                                   {!rErr(f.key) && capHit && (
                                     <p className="text-[10px] text-red-500 mt-0.5">Limit reached — only {fieldMax} left of the Production − OK Qty difference</p>
                                   )}
+                                  {remarkInput(row, idx, f, rErr)}
                                 </div>
                               );
                             })}
@@ -2458,24 +2478,8 @@ const GrindingEntry = () => {
                                   <input type="number" name={f.key} value={row[f.key]} onChange={(e) => handleRowChange(idx, e)} onWheel={(e) => e.target.blur()} ref={noWheelChange}
                                     min={0} max={1440} step={1} className={cls(rErr(f.key))} />
                                   {rErr(f.key) && <p className="text-[10px] text-red-500 mt-0.5">{rErr(f.key)}</p>}
+                                  {remarkInput(row, idx, f, rErr)}
                                 </div>
-                                {f.key === "othersMin" && (
-                                  <div className="sm:col-span-2">
-                                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                                      Remarks {Number(row.othersMin) > 0 && <span className="text-red-500">*</span>}
-                                    </label>
-                                    <textarea
-                                      name="othersRemark"
-                                      value={row.othersRemark}
-                                      onChange={(e) => handleRowChange(idx, e)}
-                                      maxLength={300}
-                                      rows={2}
-                                      placeholder="Describe the reason for Others downtime"
-                                      className={cls(rErr("othersRemark")) + " resize-none"}
-                                    />
-                                    {rErr("othersRemark") && <p className="text-[10px] text-red-500 mt-0.5">{rErr("othersRemark")}</p>}
-                                  </div>
-                                )}
                               </React.Fragment>
                             ))}
                           </div>

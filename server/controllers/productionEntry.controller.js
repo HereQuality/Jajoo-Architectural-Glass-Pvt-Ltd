@@ -13,6 +13,19 @@ const REJECTION_QTY_FIELDS = [
   "rejSizeMismatchQty", "rejHandlingBreakageQty", // includes "Others"
 ];
 
+// Optional free-text remark per Rejection Reason / Downtime & Stoppage Reason
+// (never required). Key = the reason's key minus its Min/Qty suffix + "Remark";
+// "othersRemark" predates the rest, which is why Others keeps that name.
+const REMARK_FIELDS = [
+  "rejScratchesRemark", "rejChippingRemark", "rejCornerBreakageRemark",
+  "rejSizeMismatchRemark", "rejHandlingBreakageRemark",
+  "plannedDowntimeRemark", "noManpowerRemark", "mechanicalBreakdownRemark",
+  "electricalBreakdownRemark", "rawMaterialNotAvailableRemark",
+  "humanErrorStoppageRemark", "changeoverRemark", "rawMaterialProblemRemark",
+  "noPowerRemark", "othersRemark",
+];
+const REMARK_MAX = 300;
+
 const NUMERIC_FIELDS = [
   "sizeWidthMm", "sizeHeightMm",
   "processQty", "okQty",
@@ -121,11 +134,10 @@ async function validatePayload(body) {
     if (isNaN(v) || v < 0 || v > 1440) errors[k] = "Must be 0–1440 minutes";
   }
 
-  const othersRemark = typeof body.othersRemark === "string" ? body.othersRemark.trim() : "";
-  if (Number(body.othersMin) > 0 && !othersRemark) {
-    errors.othersRemark = "Remark is required when Others (Minutes) is greater than 0";
-  } else if (othersRemark.length > 300) {
-    errors.othersRemark = "Remark cannot exceed 300 characters";
+  for (const k of REMARK_FIELDS) {
+    if (typeof body[k] === "string" && body[k].trim().length > REMARK_MAX) {
+      errors[k] = `Remark cannot exceed ${REMARK_MAX} characters`;
+    }
   }
 
   validateAdditionalPeriods(body, errors);
@@ -195,8 +207,10 @@ function buildData(body) {
     lunchStartTime: body.lunchStartTime || undefined,
     lunchEndTime: body.lunchEndTime || undefined,
     batchId: body.batchId || undefined,
-    othersRemark: typeof body.othersRemark === "string" ? body.othersRemark.trim().slice(0, 300) : "",
   };
+  for (const k of REMARK_FIELDS) {
+    data[k] = typeof body[k] === "string" ? body[k].trim().slice(0, REMARK_MAX) : "";
+  }
   for (const k of NUMERIC_FIELDS) {
     if (body[k] !== undefined && body[k] !== "") data[k] = Number(body[k]);
   }
