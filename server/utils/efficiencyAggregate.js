@@ -67,7 +67,7 @@ function aggregateEfficiencyByGroup(entries, keyFn, nameFn) {
       // Time. Mirrors productionCalculation.service.js's
       // computeBatchCalculations.
       const availabilityRatio = g.plannedProductionMin > 0 ? round2(Math.min(100, (g.availableWorkingMin / g.plannedProductionMin) * 100)) : null;
-      const performanceRatio = g.effectiveMcRunTimeMin > 0 ? round2((g.stdMinutesForOutput / g.effectiveMcRunTimeMin) * 100) : null;
+      const performanceRatio = g.availableWorkingMin > 0 ? round2((g.effectiveMcRunTimeMin / g.availableWorkingMin) * 100) : 0; // 2026-11-24: Effective Run ÷ AWT, uncapped (real value)
       const qualityRatio = g.processQty > 0 ? round2((g.okQty / g.processQty) * 100) : null;
       const oeePercent =
         performanceRatio != null && qualityRatio != null && availabilityRatio != null

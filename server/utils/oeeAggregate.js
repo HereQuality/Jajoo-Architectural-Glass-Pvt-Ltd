@@ -41,7 +41,7 @@ function aggregateOee(entries) {
   // productionCalculation.service.js's computeBatchCalculations.
   const availRatio = sumPlanned > 0 ? Math.min(100, (sumAvail / sumPlanned) * 100) : 0;
   const qualRatio = sumProcess > 0 ? (sumOk / sumProcess) * 100 : 0;
-  const perfRatio = sumEffectiveRun > 0 ? (sumStdMinutes / sumEffectiveRun) * 100 : 0;
+  const perfRatio = sumAvail > 0 ? (sumEffectiveRun / sumAvail) * 100 : 0; // 2026-11-24: Effective Run ÷ AWT, uncapped (real value)
   const oee = (availRatio / 100) * (perfRatio / 100) * (qualRatio / 100) * 100;
 
   return {

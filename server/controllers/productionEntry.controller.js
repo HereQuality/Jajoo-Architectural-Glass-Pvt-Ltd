@@ -210,20 +210,6 @@ function buildData(body) {
   return data;
 }
 
-// Server-side backstop for the same check the client already runs before
-// submitting: Production Qty can't exceed what this row's own actual M/C
-// run time (M/C Off − M/C Start) allows at this Standard Time (Ideal
-// Production). Re-derived from `data.calculated` — the same number that
-// gets stored — so it can never disagree with what the client saw.
-function capacityError(data) {
-  const ideal = data.calculated.idealProductionQty;
-  if (ideal < data.processQty) {
-    return `Not achievable: this row's own M/C run time ÷ Standard Time = ${ideal.toFixed(2)} pcs, ` +
-      `which is less than Production Qty (${data.processQty}). Reduce Production Qty or check the M/C Start/Off Time.`;
-  }
-  return null;
-}
-
 // True if two [start, off) M/C time windows overlap — a window crossing
 // midnight (off <= start) is treated as extending into the next day.
 // Mirrors client/src/pages/GrindingEntry.jsx's timeWindowsOverlap exactly.
@@ -343,10 +329,7 @@ exports.createProductionEntry = async (req, res) => {
 
     const data = buildData(req.body);
     await applyShiftCalculations(data);
-    const capacityMsg = capacityError(data);
-    if (capacityMsg) {
-      return res.status(400).json({ isOk: false, errors: { processQty: capacityMsg }, message: capacityMsg });
-    }
+    // 2026-11-24: capacity ("Not achievable") restriction removed by client decision — over-ideal production is saved as-is.
     if (req.user) {
       data.createdBy = req.user._id;
       data.createdByModel = req.user.roleType === "SuperAdmin" ? "User" : "Employee";
@@ -400,10 +383,7 @@ exports.updateProductionEntry = async (req, res) => {
 
     const data = buildData(req.body);
     await applyShiftCalculations(data);
-    const capacityMsg = capacityError(data);
-    if (capacityMsg) {
-      return res.status(400).json({ isOk: false, errors: { processQty: capacityMsg }, message: capacityMsg });
-    }
+    // 2026-11-24: capacity ("Not achievable") restriction removed by client decision — over-ideal production is saved as-is.
 
     let entry = await ProductionEntry.findOneAndUpdate({ _id: entryId }, data, {
       new: true, runValidators: true,

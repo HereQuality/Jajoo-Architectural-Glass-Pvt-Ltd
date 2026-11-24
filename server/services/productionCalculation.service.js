@@ -333,16 +333,12 @@ function rowWorkingScheduleMin(shiftOnTime, shiftOffTime, mcStartTime, mcOffTime
   return shiftDuration(start, end);
 }
 
-// Per-row Ideal Production Qty — that row's own actual run time (summed
-// across all of its ON/OFF periods, see rowEffectiveRunMin) ÷ its own
-// Standard Time per Glass. Independent of any batch — purely "how many
-// pieces should THIS row have made in the time it actually ran, at
-// standard speed."
-function computeRowIdealProductionQty(row) {
+// Per-row Ideal Production Qty (2026-11-24, senior's formulas) — that row's
+// Available Working Time ÷ its own Standard Time per Glass.
+function computeRowIdealProductionQty(row, availableWorkingMin) {
   const std = Number(row.standardTimePerPieceMin) || 0;
   if (std <= 0) return 0;
-  const runMin = rowEffectiveRunMin(row);
-  return runMin / std;
+  return (Number(availableWorkingMin) || 0) / std;
 }
 
 function round2(n) {
@@ -377,41 +373,36 @@ function computeRowCalculations(row, shiftOnTime, shiftOffTime, isFirst = true, 
   // Lunch Break (2026-09-08) is added directly into Total Stoppage, by
   // explicit user decision — see computeLunchMin's comment above.
   const lunchMin = computeLunchMin(row, row.lunchStartTime, row.lunchEndTime);
-  const totalStoppageMin = STOPPAGE_KEYS.reduce((s, k) => s + num(row[k]), 0) + lunchMin;
+  // 2026-11-24: Total Stoppage EXCLUDES lunch (lunch is its own column and is
+  // subtracted separately in Available Working Time — never twice).
+  const totalStoppageMin = STOPPAGE_KEYS.reduce((s, k) => s + num(row[k]), 0);
 
   const workingScheduleMin = rowWorkingScheduleMin(shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast);
 
   // Available Working Time never goes negative — floored at 0 rather than
   // becoming NA, so it always reads as a real (if zero) number. NA only
   // shows up one level up, on the RATIOS that would otherwise divide by it.
-  const availableWorkingMin = round2(Math.max(0, workingScheduleMin - totalStoppageMin));
+  const availableWorkingMin = round2(Math.max(0, workingScheduleMin - totalStoppageMin - lunchMin));
 
-  // Sum of this row's own ON/OFF periods — excludes any pause between two
-  // periods of this SAME row (see the file header's 2026-09-06 note).
-  const effectiveMcRunTimeMin = rowEffectiveRunMin(row);
-
-  // Unreported Time = Available Working Time not explained by either actual
-  // run time or a logged stoppage reason — captures a pause BETWEEN TWO
-  // PERIODS OF THE SAME ROW (2026-09-06 note), but not a gap to a
-  // different row (that reverted 2026-09-05 behavior — see the 2026-09-07
-  // history note).
+  // 2026-11-24 (senior's formulas): Effective M/C Run Time = Production Qty ×
+  // Standard Time; Unreported Time = Available Working Time − Effective Run.
+  const stdMinutesForOutput = num(row.processQty) * num(row.standardTimePerPieceMin);
+  const effectiveMcRunTimeMin = stdMinutesForOutput;
   const unreportedTimeMin = round2(Math.max(0, availableWorkingMin - effectiveMcRunTimeMin));
 
   // Availability Ratio — standard OEE (2026-09-11, see the file header):
   // Available Working Time ÷ Planned Production Time. NA (null) when
   // Planned Production Time is 0 (the whole schedule was planned stops).
-  const plannedStopMin = num(row.plannedDowntimeMin) + lunchMin;
-  const plannedProductionMin = Math.max(0, workingScheduleMin - plannedStopMin);
+  // 2026-11-24: the denominator is now simply Working Schedule Time (the
+  // bigger of machine time and shift time) — nothing subtracted from it;
+  // Total Stoppage and Lunch come off the numerator (AWT) only.
+  const plannedProductionMin = workingScheduleMin;
   const availabilityRatio = plannedProductionMin > 0 ? Math.min(1, availableWorkingMin / plannedProductionMin) : null;
 
-  // Performance Ratio deliberately stays based on this row's own raw
-  // Effective M/C Run Time (not Available Working Time) — Performance
-  // measures this row's own actual run against its own actual output, not
-  // against the whole shift's schedule (2026-09-05 decision). NA (null)
-  // rather than 0 when the machine never ran at all — undefined, not "0%
-  // performance".
-  const stdMinutesForOutput = num(row.processQty) * num(row.standardTimePerPieceMin);
-  const performanceRatio = effectiveMcRunTimeMin > 0 ? (stdMinutesForOutput / effectiveMcRunTimeMin) : null;
+  // Performance = Effective Run ÷ Available Working Time (= Production Qty ÷
+  // Ideal Production Qty). 2026-11-24: real value, NOT capped; 0 (not NA)
+  // when there is no Available Working Time.
+  const performanceRatio = availableWorkingMin > 0 ? effectiveMcRunTimeMin / availableWorkingMin : 0;
 
   const qualityRatio = num(row.processQty) > 0 ? num(row.okQty) / num(row.processQty) : 0;
 
@@ -426,7 +417,7 @@ function computeRowCalculations(row, shiftOnTime, shiftOffTime, isFirst = true, 
     workingScheduleMin:    round2(workingScheduleMin),
     plannedProductionMin:  round2(plannedProductionMin),
     availableWorkingMin:   round2(availableWorkingMin),
-    idealProductionQty:    round2(computeRowIdealProductionQty(row)),
+    idealProductionQty:    round2(computeRowIdealProductionQty(row, availableWorkingMin)),
     effectiveMcRunTimeMin: round2(effectiveMcRunTimeMin),
     unreportedTimeMin:     round2(unreportedTimeMin),
     availabilityRatio:     availabilityRatio === null ? null : round4(availabilityRatio),
@@ -487,20 +478,18 @@ function computeBatchCalculations(rows, shiftOnTime, shiftOffTime) {
 
   // Available Working Time floored at 0, NA only at the ratio level — see
   // computeRowCalculations' matching 2026-09-05 note.
-  const availableWorkingMin = round2(Math.max(0, workingScheduleMin - totalStoppageMin));
+  const availableWorkingMin = round2(Math.max(0, workingScheduleMin - totalStoppageMin - lunchMin));
 
   const effectiveMcRunTimeMin = round2(perRow.reduce((s, c) => s + c.effectiveMcRunTimeMin, 0));
-
   const unreportedTimeMin = round2(Math.max(0, availableWorkingMin - effectiveMcRunTimeMin));
 
   // Standard OEE Availability — same per-row rule, from combined totals.
   const plannedProductionMin = round2(perRow.reduce((s, c) => s + c.plannedProductionMin, 0));
   const availabilityRatio = plannedProductionMin > 0 ? Math.min(1, availableWorkingMin / plannedProductionMin) : null;
 
-  // Performance stays anchored to the batch's combined raw Effective M/C
-  // Run Time (not Available Working Time) — same per-row rule, summed.
-  const stdMinutesForOutput = rows.reduce((sum, r) => sum + num(r.processQty) * num(r.standardTimePerPieceMin), 0);
-  const performanceRatio = effectiveMcRunTimeMin > 0 ? (stdMinutesForOutput / effectiveMcRunTimeMin) : null;
+  // Performance = combined Effective Run ÷ combined Available Working Time
+  // (2026-11-24); real value (not capped), 0 when AWT is 0.
+  const performanceRatio = availableWorkingMin > 0 ? effectiveMcRunTimeMin / availableWorkingMin : 0;
 
   const totalProcessQty = rows.reduce((s, r) => s + num(r.processQty), 0);
   const totalOkQty = rows.reduce((s, r) => s + num(r.okQty), 0);

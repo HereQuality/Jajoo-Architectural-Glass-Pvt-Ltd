@@ -175,7 +175,8 @@ function computeBatchRowScheduleCalcs(rows, shiftOnTime, shiftOffTime) {
     const isLast = i === sorted.length - 1;
     const ownSpan = rowOwnSpan(row);
     const lunchMin = computeLunchMin(row, row.lunchStartTime, row.lunchEndTime);
-    const totalStoppageMin = STOPPAGE_KEYS.reduce((s, k) => s + num(row[k]), 0) + lunchMin;
+    // 2026-11-24: Total Stoppage excludes lunch (subtracted separately in AWT).
+    const totalStoppageMin = STOPPAGE_KEYS.reduce((s, k) => s + num(row[k]), 0);
     const { overtimeMin, startDelayMin, earlyClosedMin } = deriveShiftDeltaForRow(
       shiftOnTime, shiftOffTime, ownSpan.start, ownSpan.end, isFirst, isLast,
     );
@@ -184,10 +185,11 @@ function computeBatchRowScheduleCalcs(rows, shiftOnTime, shiftOffTime) {
       workingScheduleMin,
       // Standard OEE Planned Production Time — see server
       // productionCalculation.service.js's 2026-09-11 note.
-      plannedProductionMin: Math.max(0, workingScheduleMin - num(row.plannedDowntimeMin) - lunchMin),
+      plannedProductionMin: workingScheduleMin, // 2026-11-24: denominator = Working Schedule Time (server mirror)
       lunchMin,
       totalStoppageMin,
-      effectiveMcRunTimeMin: rowEffectiveRunMin(row),
+      // 2026-11-24: Production Qty × Standard Time (server mirror).
+      effectiveMcRunTimeMin: num(row.processQty) * num(row.standardTimePerPieceMin),
       overtimeMin,
       startDelayMin,
       earlyClosedMin,
@@ -216,7 +218,7 @@ export function computeBatchCalculations(rows, shiftOnTime, shiftOffTime) {
 
   // Available Working Time floored at 0, NA only at the ratio level — see
   // server productionCalculation.service.js's matching 2026-09-05 note.
-  const availableWorkingMin = round2(Math.max(0, workingScheduleMin - totalStoppageMin));
+  const availableWorkingMin = round2(Math.max(0, workingScheduleMin - totalStoppageMin - lunchMin));
 
   const effectiveMcRunTimeMin = round2(perRow.reduce((s, c) => s + c.effectiveMcRunTimeMin, 0));
 
@@ -227,10 +229,9 @@ export function computeBatchCalculations(rows, shiftOnTime, shiftOffTime) {
   const plannedProductionMin = round2(perRow.reduce((s, c) => s + c.plannedProductionMin, 0));
   const availabilityRatio = plannedProductionMin > 0 ? Math.min(1, availableWorkingMin / plannedProductionMin) : null;
 
-  // Performance stays anchored to the batch's combined raw Effective M/C
-  // Run Time (not Available Working Time) — 2026-09-05 decision.
-  const stdMinutesForOutput = rows.reduce((sum, r) => sum + num(r.processQty) * num(r.standardTimePerPieceMin), 0);
-  const performanceRatio = effectiveMcRunTimeMin > 0 ? (stdMinutesForOutput / effectiveMcRunTimeMin) : null;
+  // Performance = Effective Run ÷ Available Working Time (2026-11-24); real value, not capped;
+  // 0 (not NA) when AWT is 0.
+  const performanceRatio = availableWorkingMin > 0 ? effectiveMcRunTimeMin / availableWorkingMin : 0;
 
   const totalProcessQty = rows.reduce((s, r) => s + num(r.processQty), 0);
   const totalOkQty = rows.reduce((s, r) => s + num(r.okQty), 0);

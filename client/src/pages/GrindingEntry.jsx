@@ -21,7 +21,7 @@ import DatePicker from "../Components/Common/DatePicker";
 import TimePicker from "../Components/Common/TimePicker";
 import DeleteModal from "../Components/Common/DeleteModal";
 import { isEntryEditable, parseLocalDate, buildHolidaySet } from "../utils/workingDays";
-import { computeBatchCalculations } from "../utils/productionCalculation";
+import { computeBatchCalculations, computeLunchMin } from "../utils/productionCalculation";
 
 // ── Stoppage fields ───────────────────────────────────────────────────────
 const PAGE_SIZE = 20;
@@ -67,43 +67,43 @@ const CALC_COLUMNS = [
     label: "Total Stoppage (min)",
     unit: "min",
     formula:
-      "Total Stoppage = Planned Downtime + No Manpower + Mechanical Breakdown + Electrical Breakdown + Raw Material Not Available + Stoppage (Human Error) + Changeover + Raw Material Problem + No Power + Others + Lunch (see the Lunch column), for this row only",
+      "Total Stoppage = Planned Downtime + No Manpower + Mechanical Breakdown + Electrical Breakdown + Raw Material Not Available + Stoppage (Human Error) + Changeover + Raw Material Problem + No Power + Others (Lunch is NOT included — it has its own column), for this row only",
   },
   {
     key: "availableWorkingMin",
     label: "Available Working Time (min)",
     unit: "min",
-    formula: "Available Working Time = Working Schedule Time − Total Stoppage, floored at 0 (never negative) — per row",
+    formula: "Available Working Time = Working Schedule Time − Total Stoppage − Lunch (Lunch only when this row's M/C time fully covers the lunch window), floored at 0 — per row",
   },
   {
     key: "idealProductionQty",
     label: "Ideal Production (qty)",
     unit: "qty",
-    formula: "Ideal Production = this row's own actual M/C run time (summed across all of its ON/OFF periods, if it has more than one) ÷ its own Standard Time per Glass — per row",
+    formula: "Ideal Production = this row's Available Working Time ÷ its own Standard Time per Glass — per row",
   },
   {
     key: "effectiveMcRunTimeMin",
     label: "Effective M/C Run Time (min)",
     unit: "min",
-    formula: "Effective M/C Run Time = the SUM of this row's own M/C ON/OFF periods (usually just M/C Off − M/C Start; if this row has Additional Periods, each one's own duration is added) — a pause between two periods of this same row is excluded, and flows into Unreported Time instead — per row",
+    formula: "Effective M/C Run Time = Production Qty × Standard Time (min) — per row",
   },
   {
     key: "unreportedTimeMin",
     label: "Unreported Time (min)",
     unit: "min",
-    formula: "Unreported Time = MAX(0, Available Working Time − Effective M/C Run Time) — per row. Includes a pause between two periods of this SAME entry, since that's never explained by run time or a stoppage reason — but not a gap to a different entry (see Working Schedule Time).",
+    formula: "Unreported Time = MAX(0, Available Working Time − Effective M/C Run Time) — per row",
   },
   {
     key: "availabilityRatio",
     label: "Availability Ratio",
     unit: "",
-    formula: "Availability Ratio = Available Working Time ÷ Planned Production Time, where Planned Production Time = Working Schedule Time − Planned Downtime − Lunch Break (NA if Planned Production Time is 0) — per row",
+    formula: "Availability Ratio = Available Working Time ÷ Working Schedule Time, where Working Schedule Time is the bigger of this row's machine ON/OFF time and the Shift ON/OFF time, and Available Working Time = Working Schedule Time − Total Stoppage − Lunch (Lunch only when this row fully covers the lunch window) (NA if Working Schedule Time is 0) — per row",
   },
   {
     key: "performanceRatio",
     label: "Performance Ratio",
     unit: "",
-    formula: "Performance Ratio = (this row's own Production Qty × Standard Time) ÷ this row's own Effective M/C Run Time (NA if Effective M/C Run Time is 0) — per row",
+    formula: "Performance Ratio = Effective M/C Run Time ÷ Available Working Time (same as Production Qty ÷ Ideal Production Qty); shown as the real value even above 100% (0 when Available Working Time is 0) — per row",
   },
   {
     key: "qualityRatio",
@@ -113,8 +113,13 @@ const CALC_COLUMNS = [
   },
 ];
 
-const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (NA if Availability or Performance is NA) — computed per row, from that row's own data";
-const LUNCH_FORMULA = "Lunch = the Machine's configured Lunch Break window (any length, e.g. 30 min or 1 hour), ADDED INTO Total Stoppage — all-or-nothing: only counted when this row's own M/C time (earliest period's start through latest period's end) FULLY COVERS the lunch window. A row ending even 1 minute before the window closes gets 0, not a partial amount. Blank/0 when this machine has no Lunch Break configured.";
+const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (Performance is the real value, not capped) — computed per row, from that row's own data";
+const DAILY_NOTE = " — calculated from ALL entries of this Machine on this Date combined (their totals are summed first, then the ratio is taken).";
+const DAILY_AVAIL_FORMULA = "Daily Availability = total Available Working Time ÷ total Working Schedule Time" + DAILY_NOTE;
+const DAILY_PERF_FORMULA = "Daily Performance = total Effective M/C Run Time (Σ Production Qty × Standard Time) ÷ total Available Working Time (real value, not capped)" + DAILY_NOTE;
+const DAILY_QUAL_FORMULA = "Daily Quality = total OK Qty ÷ total Production Qty" + DAILY_NOTE;
+const DAILY_OEE_FORMULA = "Daily OEE % = Daily Availability × Daily Performance × Daily Quality × 100" + DAILY_NOTE;
+const LUNCH_FORMULA = "Lunch = the Machine's configured Lunch Break window (any length, e.g. 30 min or 1 hour), SUBTRACTED in Available Working Time (AWT = Working Schedule Time − Total Stoppage − Lunch; it is NOT part of Total Stoppage) — all-or-nothing: only counted when this row's own M/C time (earliest period's start through latest period's end) FULLY COVERS the lunch window. A row ending even 1 minute before the window closes gets 0, not a partial amount. Blank/0 when this machine has no Lunch Break configured.";
 const OVERTIME_FORMULA = "Overtime = max(0, Shift On − M/C Start) + max(0, M/C Off − Shift Off) — but only the FIRST entry in a batch can contribute the early-start part, and only the LAST entry can contribute the late-finish part. A middle entry always shows 0 — it isn't touching either shift boundary.";
 const DELAY_EARLY_FORMULA = "Start Delay = max(0, M/C Start − Shift On), only on the FIRST entry in a batch  ·  Early Closed = max(0, Shift Off − M/C Off), only on the LAST entry. A middle entry always shows 0 for both.";
 
@@ -243,18 +248,6 @@ const rowEffectiveRunMin = (row) => {
   }, 0);
 };
 
-// Ideal Production Qty is a PER-ROW capacity check, independent of Shift
-// On/Off Time and stoppage minutes — mirrors server/services/
-// productionCalculation.service.js's computeRowIdealProductionQty exactly:
-// this row's own actual M/C run time (summed across all of its ON/OFF
-// periods) ÷ its own Standard Time per Glass. "Given how long this size
-// actually ran, how many pieces should it have made at standard speed."
-const computeIdealProductionQty = (v) => {
-  const std = Number(v.standardTimePerPieceMin) || 0;
-  if (std <= 0) return 0;
-  return rowEffectiveRunMin(v) / std;
-};
-
 // ── Client-side validation ────────────────────────────────────────────────
 // Shared fields — Process/M-C Name/Date/Operator, picked once per modal.
 const validateShared = (v) => {
@@ -365,19 +358,6 @@ const validateRow = (row, shared) => {
   const othersRemark = (row.othersRemark || "").trim();
   if (Number(row.othersMin) > 0 && !othersRemark) e.othersRemark = "Remark is required when Others is greater than 0";
   else if (othersRemark.length > 300) e.othersRemark = "Cannot exceed 300 characters";
-
-  // Capacity check: can't process more pieces than this row's own actual
-  // M/C run time (M/C Off − M/C Start) allows at this Standard Time. Only
-  // run once every input that feeds it is itself already valid, so this
-  // doesn't pile on top of more basic errors above.
-  if (!e.mcStartTime && !e.mcOffTime && !e.additionalPeriods && !e.standardTimePerPieceMin && !e.processQty) {
-    const idealProductionQty = computeIdealProductionQty(row);
-    if (idealProductionQty < pq) {
-      e.processQty =
-        `Not achievable: M/C run time ÷ Standard Time = ${idealProductionQty.toFixed(2)} pcs, ` +
-        `which is less than Production Qty (${pq}). Reduce Production Qty or check the M/C Start/Off Time.`;
-    }
-  }
 
   return e;
 };
@@ -1184,7 +1164,6 @@ const GrindingEntry = () => {
       }
       const dayCalcs = new Map();
       for (const [k, rows] of dayGroups) {
-        if (rows.length < 2) continue;
         const f = rows[0];
         const on = f.shiftOnTime || (typeof f.machine === "object" ? f.machine?.machineOnTime : null);
         const off = f.shiftOffTime || (typeof f.machine === "object" ? f.machine?.machineOffTime : null);
@@ -2028,15 +2007,15 @@ const GrindingEntry = () => {
                   there's nothing to total), shown as their own columns
                   rather than an extra stacked line inside the 4 columns
                   above. */}
-              <th className="sticky top-0 z-20 bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Daily Availability</th>
-              <th className="sticky top-0 z-20 bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Daily Performance</th>
-              <th className="sticky top-0 z-20 bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">Daily Quality</th>
+              <CalcHeader label="Daily Availability" formula={DAILY_AVAIL_FORMULA} colKey="dailyAvail" openKey={openFormula?.key} onToggle={toggleFormula} sticky="sticky top-0" bg="bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300" extraClass="border-b" />
+              <CalcHeader label="Daily Performance" formula={DAILY_PERF_FORMULA} colKey="dailyPerf" openKey={openFormula?.key} onToggle={toggleFormula} sticky="sticky top-0" bg="bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300" extraClass="border-b" />
+              <CalcHeader label="Daily Quality" formula={DAILY_QUAL_FORMULA} colKey="dailyQual" openKey={openFormula?.key} onToggle={toggleFormula} sticky="sticky top-0" bg="bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300" extraClass="border-b" />
               {/* Daily OEE % — locked (sticky) against the right edge, right
                   next to Actions, so it stays visible no matter how far
                   right you scroll through the stoppage/rejection detail
                   columns. Needs a fully opaque background (no /alpha), same
                   reason as Actions — it overlaps scrolled-away cells. */}
-              <th className="sticky top-0 right-[90px] z-30 bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-200 px-3 py-2 font-bold whitespace-nowrap border-l border-r border-b border-slate-300 dark:border-slate-700 shadow-[-4px_0_10px_rgba(0,0,0,0.05)]">Daily OEE %</th>
+              <CalcHeader label="Daily OEE %" formula={DAILY_OEE_FORMULA} colKey="dailyOee" openKey={openFormula?.key} onToggle={toggleFormula} z="z-30" sticky="sticky top-0 right-[90px]" bg="bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-200" extraClass="border-l border-b font-bold shadow-[-4px_0_10px_rgba(0,0,0,0.05)]" />
 
               {/* Actions */}
               <th className="sticky top-0 right-0 z-30 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-b border-l border-slate-300 dark:border-slate-700 text-right shadow-[-4px_0_10px_rgba(0,0,0,0.05)] w-[90px] min-w-[90px] max-w-[90px]">Actions</th>
@@ -2083,7 +2062,7 @@ const GrindingEntry = () => {
               const dateKey = (e) => (typeof e.date === "string" ? e.date.split("T")[0] : new Date(e.date).toISOString().split("T")[0]);
               const machineIdOf = (e) => String(typeof e.machine === "object" ? e.machine?._id : e.machine);
               const dayRows = entries.filter((e) => dateKey(e) === dateKey(first) && machineIdOf(e) === machineIdOf(first));
-              const hasDayTotal = dayRows.length > 1;
+              const hasDayTotal = dayRows.length > 0;
               const dayCalc = hasDayTotal ? computeBatchCalculations(dayRows, batchShiftOnTime, batchShiftOffTime) : null;
               const availabilityRatioTotal = dayCalc?.availabilityRatio;
               const performanceRatioTotal = dayCalc?.performanceRatio;
