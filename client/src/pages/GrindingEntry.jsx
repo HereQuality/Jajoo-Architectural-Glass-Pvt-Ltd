@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback } from "react";
-import ExcelJS from "exceljs";
 import ReactDOM from "react-dom";
 import Select, { components as selectComponents } from "react-select";
 import { Plus, Minus, X, Eye, Pencil, Trash2, Gauge, AlertTriangle, Search, Download, Clock, ChevronRight, ChevronDown, ChevronLeft, CalendarDays } from "lucide-react";
@@ -18,25 +17,28 @@ import {
   getProductionEfficiency, downloadGrindingEfficiencyPdf, getShiftTimeReport,
 } from "../api/productionEntries.api";
 import DatePicker from "../Components/Common/DatePicker";
+import DateRangePicker from "../Components/Common/DateRangePicker";
+import FilterBar from "../Components/Common/FilterBar";
 import TimePicker from "../Components/Common/TimePicker";
 import DeleteModal from "../Components/Common/DeleteModal";
 import { isEntryEditable, parseLocalDate, buildHolidaySet } from "../utils/workingDays";
-import { computeBatchCalculations, computeLunchMin } from "../utils/productionCalculation";
+import { computeBatchCalculations } from "../utils/productionCalculation";
+import { buildGrindingWorkbook, XLSX_MIME } from "../utils/exportGrindingExcel";
 
 // ── Stoppage fields ───────────────────────────────────────────────────────
 const PAGE_SIZE = 20;
 
 const STOPPAGE_FIELDS = [
-  { key: "plannedDowntimeMin",         label: "Planned Downtime (Minutes)" },
-  { key: "noManpowerMin",              label: "No Manpower (Minutes)" },
-  { key: "mechanicalBreakdownMin",     label: "Mechanical Breakdown (Minutes)" },
-  { key: "electricalBreakdownMin",     label: "Electrical Breakdown (Minutes)" },
-  { key: "rawMaterialNotAvailableMin", label: "Raw Material Not Available (Minutes)" },
-  { key: "humanErrorStoppageMin",      label: "Stoppage (Human Error) (Minutes)" },
-  { key: "changeoverMin",              label: "Changeover (Minutes)" },
-  { key: "rawMaterialProblemMin",      label: "Raw Material Problem (Minutes)" },
-  { key: "noPowerMin",                 label: "No Power (Minutes)" },
-  { key: "othersMin",                  label: "Others (Minutes)" },
+  { key: "plannedDowntimeMin", remarkKey: "plannedDowntimeRemark", label: "Planned Downtime (Minutes)" },
+  { key: "noManpowerMin", remarkKey: "noManpowerRemark", label: "No Manpower (Minutes)" },
+  { key: "mechanicalBreakdownMin", remarkKey: "mechanicalBreakdownRemark", label: "Mechanical Breakdown (Minutes)" },
+  { key: "electricalBreakdownMin", remarkKey: "electricalBreakdownRemark", label: "Electrical Breakdown (Minutes)" },
+  { key: "rawMaterialNotAvailableMin", remarkKey: "rawMaterialNotAvailableRemark", label: "Raw Material Not Available (Minutes)" },
+  { key: "humanErrorStoppageMin", remarkKey: "humanErrorStoppageRemark", label: "Stoppage (Human Error) (Minutes)" },
+  { key: "changeoverMin", remarkKey: "changeoverRemark", label: "Changeover (Minutes)" },
+  { key: "rawMaterialProblemMin", remarkKey: "rawMaterialProblemRemark", label: "Raw Material Problem (Minutes)" },
+  { key: "noPowerMin", remarkKey: "noPowerRemark", label: "No Power (Minutes)" },
+  { key: "othersMin", remarkKey: "othersRemark", label: "Others (Minutes)" },
 ];
 
 // ── Rejection reason fields ───────────────────────────────────────────────
@@ -44,12 +46,15 @@ const STOPPAGE_FIELDS = [
 // directly, it's the sum of these (see server/models/ProductionEntry.js and
 // buildData() in the controller, which derive rejectedQty from these keys).
 const REJECTION_FIELDS = [
-  { key: "rejScratchesQty",        label: "Scratches" },
-  { key: "rejChippingQty",         label: "Chipping" },
-  { key: "rejCornerBreakageQty",   label: "Corner Breakage" },
-  { key: "rejSizeMismatchQty",     label: "Size Mis-match" },
-  { key: "rejHandlingBreakageQty", label: "Handling Breakage and Others" },
+  { key: "rejScratchesQty", remarkKey: "rejScratchesRemark", label: "Scratches" },
+  { key: "rejChippingQty", remarkKey: "rejChippingRemark", label: "Chipping" },
+  { key: "rejCornerBreakageQty", remarkKey: "rejCornerBreakageRemark", label: "Corner Breakage" },
+  { key: "rejSizeMismatchQty", remarkKey: "rejSizeMismatchRemark", label: "Size Mis-match" },
+  { key: "rejHandlingBreakageQty", remarkKey: "rejHandlingBreakageRemark", label: "Handling Breakage and Others" },
 ];
+
+// Every reason (rejection + downtime/stoppage) has its own optional remark.
+const REMARK_FIELDS = [...REJECTION_FIELDS, ...STOPPAGE_FIELDS];
 
 
 // ── Calculated (derived) columns shown in the sheet, in order ────────────
@@ -170,9 +175,9 @@ const buildRow = () => ({
   standardTimePerPieceMin: "",
   processQty: "",
   okQty: "",
-  othersRemark: "",
   ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, "0"])),
   ...Object.fromEntries(REJECTION_FIELDS.map((f) => [f.key, "0"])),
+  ...Object.fromEntries([...STOPPAGE_FIELDS, ...REJECTION_FIELDS].map((f) => [f.remarkKey, ""])),
 });
 
 // ── Capacity check helper — mirrors server/services/productionCalculation
@@ -355,9 +360,10 @@ const validateRow = (row, shared) => {
     if (isNaN(n) || n < 0 || n > 1440) e[f.key] = "0–1440 min";
   }
 
-  const othersRemark = (row.othersRemark || "").trim();
-  if (Number(row.othersMin) > 0 && !othersRemark) e.othersRemark = "Remark is required when Others is greater than 0";
-  else if (othersRemark.length > 300) e.othersRemark = "Cannot exceed 300 characters";
+  // Remarks are optional — only the length is checked.
+  for (const f of [...STOPPAGE_FIELDS, ...REJECTION_FIELDS]) {
+    if ((row[f.remarkKey] || "").trim().length > 300) e[f.remarkKey] = "Cannot exceed 300 characters";
+  }
 
   return e;
 };
@@ -1014,8 +1020,50 @@ const GrindingEntry = () => {
     };
   }, [openRemark]);
 
-  const toggleRemark = (id, text, rect) => {
-    setOpenRemark((prev) => (prev && prev.id === id ? null : { id, text, rect }));
+  const toggleRemark = (id, label, text, rect) => {
+    setOpenRemark((prev) => (prev && prev.id === id ? null : { id, label, text, rect }));
+  };
+
+  // Optional remark box shown under each reason's value input in the form.
+  const remarkInput = (row, idx, f, rErr) => (
+    <>
+      <textarea
+        name={f.remarkKey}
+        value={row[f.remarkKey] || ""}
+        onChange={(e) => handleRowChange(idx, e)}
+        maxLength={300}
+        rows={1}
+        placeholder="Remark (optional)"
+        aria-label={`${f.label} remark`}
+        className={cls(rErr(f.remarkKey)) + " resize-none mt-1 !py-1.5 !text-xs"}
+      />
+      {rErr(f.remarkKey) && <p className="text-[10px] text-red-500 mt-0.5">{rErr(f.remarkKey)}</p>}
+    </>
+  );
+
+  // One line of a reason column: the value plus an eye button that opens that
+  // entry's remark for this specific reason (highlighted when one exists).
+  const reasonCellItem = (e, f, valueText) => {
+    const id = `${e._id}:${f.remarkKey}`;
+    const has = !!(e[f.remarkKey] || "").trim();
+    return (
+      <span key={e._id} className="inline-flex items-center gap-1.5">
+        {valueText}
+        <button
+          type="button"
+          onClick={(ev) => {
+            ev.stopPropagation();
+            toggleRemark(id, `Remark — ${f.label}`, e[f.remarkKey], ev.currentTarget.getBoundingClientRect());
+          }}
+          title={has ? "Show remark" : "No remark entered"}
+          className={`p-0.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${
+            openRemark?.id === id ? "text-brand-600" : has ? "text-brand-500" : "text-slate-300 dark:text-slate-600"
+          }`}
+        >
+          <Eye className="w-3.5 h-3.5" />
+        </button>
+      </span>
+    );
   };
 
   const toggleFormula = (key, label, formula, rect) => {
@@ -1089,6 +1137,41 @@ const GrindingEntry = () => {
   };
   useEffect(() => { fetchSheet(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [activeMachine, dateFrom, dateTo, page, debouncedSheetSearch]);
 
+  // Excel export — every entry matching the Machine / From / To filters (not
+  // just the 20 on this page), fetched in chunks, one row per entry.
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const CHUNK = 1000;
+      const params = {};
+      if (activeMachine) params.machine = activeMachine;
+      if (dateFrom) params.from = dateFrom;
+      if (dateTo) params.to = dateTo;
+      const all = [];
+      let total = Infinity;
+      while (all.length < total) {
+        const res = await listProductionEntries({ ...params, per_page: CHUNK, skip: all.length });
+        const batch = res.data?.data || [];
+        total = res.data?.count || 0;
+        if (batch.length === 0) break;
+        all.push(...batch);
+      }
+      if (all.length === 0) {
+        toast.warning?.("No entries to export for the selected filters");
+        return;
+      }
+      const buffer = await buildGrindingWorkbook(all, { rejectionFields: REJECTION_FIELDS, stoppageFields: STOPPAGE_FIELDS });
+      triggerBlobDownload(buffer, `grinding-entries_${dateFrom || "all"}_to_${dateTo || "all"}.xlsx`, XLSX_MIME);
+      toast.success?.(`Exported ${all.length} ${all.length === 1 ? "entry" : "entries"} to Excel`);
+    } catch (err) {
+      console.error(err);
+      toast.error?.("Failed to export Excel");
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
   // Any filter change (machine/date/search) should reset back to page 1 —
   // otherwise a narrower filter could land on a now out-of-range page.
   useEffect(() => { setPage(1); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [activeMachine, dateFrom, dateTo, debouncedSheetSearch]);
@@ -1116,7 +1199,7 @@ const GrindingEntry = () => {
         ...REJECTION_FIELDS.map((f) => e[f.key]),
         c.workingScheduleMin,
         ...STOPPAGE_FIELDS.map((f) => e[f.key]),
-        e.othersRemark, // Remark
+        ...REMARK_FIELDS.map((f) => e[f.remarkKey]),
         c.totalStoppageMin,
         fmtNum(c.availableWorkingMin),
         fmtNum(c.idealProductionQty),
@@ -1138,131 +1221,6 @@ const GrindingEntry = () => {
     if (!q) return entries;
     return entries.filter((e) => matchesSearch(e, q));
   }, [entries, debouncedSheetSearch, matchesSearch]);
-
-  // Excel export — pulls EVERY entry matching the current Machine / From /
-  // To filters (not just the visible page), applies the same search text,
-  // and keeps the same order as the sheet (ascending when dates are set).
-  const [exporting, setExporting] = useState(false);
-  const exportExcel = async () => {
-    setExporting(true);
-    try {
-      const res = await listProductionEntries({ ...buildFilterParams(), per_page: 100000, skip: 0 });
-      let all = res.data?.data || [];
-      const q = debouncedSheetSearch.trim().toLowerCase();
-      if (q) all = all.filter((e) => matchesSearch(e, q));
-      if (!all.length) { toast.error?.("No entries to export for the selected filters"); return; }
-
-      const dateKey = (e) => (typeof e.date === "string" ? e.date.split("T")[0] : new Date(e.date).toISOString().split("T")[0]);
-      const machineIdOf = (e) => String(typeof e.machine === "object" ? e.machine?._id : e.machine);
-      const machineNameOf = (e) => (typeof e.machine === "object" ? e.machine?.machineName : machines.find((m) => m._id === e.machine)?.machineName) || "";
-      // Daily OEE — same whole-day (Machine + Date) total the sheet shows.
-      const dayGroups = new Map();
-      for (const e of all) {
-        const k = `${dateKey(e)}|${machineIdOf(e)}`;
-        if (!dayGroups.has(k)) dayGroups.set(k, []);
-        dayGroups.get(k).push(e);
-      }
-      const dayCalcs = new Map();
-      for (const [k, rows] of dayGroups) {
-        const f = rows[0];
-        const on = f.shiftOnTime || (typeof f.machine === "object" ? f.machine?.machineOnTime : null);
-        const off = f.shiftOffTime || (typeof f.machine === "object" ? f.machine?.machineOffTime : null);
-        dayCalcs.set(k, computeBatchCalculations(rows, on, off));
-      }
-      const num = (v) => (v == null || v === "" || isNaN(v) ? null : Number(v));
-      const round = (v, d = 2) => (num(v) == null ? null : Number(Number(v).toFixed(d)));
-
-      const columns = [
-        { header: "Date", key: "date", width: 11 },
-        { header: "Machine", key: "machine", width: 24 },
-        { header: "Operator", key: "operator", width: 20 },
-        { header: "Size (mm)", key: "size", width: 13 },
-        { header: "Thickness (mm)", key: "thicknessMm", width: 12 },
-        { header: "Std. Time (min)", key: "standardTimePerPieceMin", width: 12 },
-        { header: "M/C Start", key: "mcStartTime", width: 10 },
-        { header: "M/C Off", key: "mcOffTime", width: 10 },
-        { header: "Shift On", key: "shiftOn", width: 10 },
-        { header: "Shift Off", key: "shiftOff", width: 10 },
-        { header: "Overtime (min)", key: "overtimeMin", width: 12 },
-        { header: "Start Delay (min)", key: "startDelayMin", width: 12 },
-        { header: "Early Closed (min)", key: "earlyClosedMin", width: 12 },
-        { header: "Production Qty", key: "processQty", width: 12 },
-        { header: "OK Qty", key: "okQty", width: 10 },
-        { header: "Rejected Qty", key: "rejectedQty", width: 11 },
-        ...REJECTION_FIELDS.map((f) => ({ header: f.label, key: f.key, width: 14 })),
-        ...STOPPAGE_FIELDS.map((f) => ({ header: f.label, key: f.key, width: 16 })),
-        { header: "Lunch (min)", key: "lunchMin", width: 10 },
-        { header: "Remark", key: "othersRemark", width: 24 },
-        ...CALC_COLUMNS.map((c) => ({ header: c.label, key: c.key, width: 16 })),
-        { header: "OEE %", key: "oeePercent", width: 10 },
-        { header: "Daily Availability", key: "dayAvail", width: 13 },
-        { header: "Daily Performance", key: "dayPerf", width: 13 },
-        { header: "Daily Quality", key: "dayQual", width: 12 },
-        { header: "Daily OEE %", key: "dayOee", width: 12 },
-      ];
-
-      const wb = new ExcelJS.Workbook();
-      const ws = wb.addWorksheet("Grinding Data", { views: [{ state: "frozen", xSplit: 2, ySplit: 1 }] });
-      ws.columns = columns;
-      for (const e of all) {
-        const c = e.calculated || {};
-        const day = dayCalcs.get(`${dateKey(e)}|${machineIdOf(e)}`);
-        const row = {
-          date: fmtDate(e.date),
-          machine: machineNameOf(e),
-          operator: e.operator?.name || "",
-          size: e.sizeWidthMm != null && e.sizeHeightMm != null ? `${e.sizeWidthMm}x${e.sizeHeightMm}` : "",
-          thicknessMm: num(e.thicknessMm),
-          standardTimePerPieceMin: num(e.standardTimePerPieceMin),
-          mcStartTime: e.mcStartTime || "",
-          mcOffTime: (e.mcOffTime || "") + (e.mcOffNextDay ? " (+1d)" : ""),
-          shiftOn: e.shiftOnTime || (typeof e.machine === "object" ? e.machine?.machineOnTime : "") || "",
-          shiftOff: e.shiftOffTime || (typeof e.machine === "object" ? e.machine?.machineOffTime : "") || "",
-          overtimeMin: num(c.overtimeMin),
-          startDelayMin: num(c.startDelayMin),
-          earlyClosedMin: num(c.earlyClosedMin),
-          processQty: num(e.processQty),
-          okQty: num(e.okQty),
-          rejectedQty: num(e.rejectedQty),
-          lunchMin: num(c.lunchMin),
-          othersRemark: e.othersRemark || "",
-          oeePercent: round(c.oeePercent),
-          dayAvail: day ? round(day.availabilityRatio) : null,
-          dayPerf: day ? round(day.performanceRatio) : null,
-          dayQual: day ? round(day.qualityRatio) : null,
-          dayOee: day ? round(day.oeePercent) : null,
-        };
-        for (const f of REJECTION_FIELDS) row[f.key] = num(e[f.key]) ?? 0;
-        for (const f of STOPPAGE_FIELDS) row[f.key] = num(e[f.key]) ?? 0;
-        for (const col of CALC_COLUMNS) row[col.key] = round(c[col.key]);
-        ws.addRow(row);
-      }
-      const header = ws.getRow(1);
-      header.font = { bold: true, color: { argb: "FFFFFFFF" } };
-      header.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1E40AF" } };
-      header.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-      header.height = 32;
-      ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };
-
-      const buf = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-      const range = dateFrom || dateTo ? `_${dateFrom || "start"}_to_${dateTo || "today"}` : "";
-      const mName = activeMachine ? `_${(machines.find((m) => m._id === activeMachine)?.machineName || "machine").replace(/[^\w-]+/g, "-")}` : "";
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `grinding-data${mName}${range}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error(err);
-      toast.error?.("Failed to export Excel");
-    } finally {
-      setExporting(false);
-    }
-  };
 
   // Entries saved together from one multi-row "Add Entry" submission share a
   // batchId — group them back into one array so the sheet renders them as a
@@ -1532,9 +1490,9 @@ const GrindingEntry = () => {
       standardTimePerPieceMin: e.standardTimePerPieceMin || "",
       processQty: e.processQty || "0",
       okQty: e.okQty || "0",
-      othersRemark: e.othersRemark || "",
       ...Object.fromEntries(STOPPAGE_FIELDS.map((f) => [f.key, String(e[f.key] || "0")])),
       ...Object.fromEntries(REJECTION_FIELDS.map((f) => [f.key, String(e[f.key] || "0")])),
+      ...Object.fromEntries(REMARK_FIELDS.map((f) => [f.remarkKey, e[f.remarkKey] || ""])),
     }]);
     setRowErrors([{}]);
     setFormErrors({});
@@ -1739,67 +1697,69 @@ const GrindingEntry = () => {
 
   return (
     <div className="w-full">
-      {/* Header + Filters — one line on wide screens, wraps on narrow ones */}
-      <div className="flex flex-wrap items-end justify-between gap-4 mb-3">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="relative w-full sm:w-56">
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Search</label>
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-[34px] -translate-y-1/2 pointer-events-none" />
+      {/* Toolbar — ONE Filters button at the far left (Machine + Date Range
+          live in its panel, same as the Dashboard) so the panel opens from
+          the left edge, then Search, then the page's action buttons pushed
+          to the right. relative z-50 lifts the panel above the sheet's
+          sticky/frozen header cells (z-40). Wraps on narrow screens. */}
+      <div className="relative z-50 flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <FilterBar
+            hasActiveFilters={!!(activeMachine || dateFrom || dateTo)}
+            onClear={() => { setActiveMachine(""); setDateFrom(""); setDateTo(""); }}
+          >
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Machine</label>
+              <select
+                value={activeMachine}
+                onChange={(e) => setActiveMachine(e.target.value)}
+                className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-sm outline-none focus:border-brand-500 dark:text-slate-200"
+              >
+                <option value="">All Machines</option>
+                {machines.map((m) => (
+                  <option key={m._id} value={m._id}>{m.machineName}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Date Range</label>
+              <DateRangePicker
+                from={dateFrom}
+                to={dateTo}
+                onChange={({ from, to }) => { setDateFrom(from || ""); setDateTo(to || ""); }}
+              />
+            </div>
+          </FilterBar>
+          <div className="relative w-full sm:w-64">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={sheetSearch}
               onChange={(e) => setSheetSearch(e.target.value)}
               placeholder="Search this table…"
+              aria-label="Search this table"
               className="w-full bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 rounded-xl pl-9 pr-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
             />
           </div>
-          <div className="w-full sm:w-56">
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">Machine</label>
-            <select
-              value={activeMachine}
-              onChange={(e) => setActiveMachine(e.target.value)}
-              className="w-full bg-white dark:bg-[#1a1a1a] border border-slate-300 dark:border-slate-700 rounded-xl px-3.5 py-2 text-sm outline-none focus:border-brand-500 focus:ring-4 focus:ring-brand-500/15 transition-shadow"
-            >
-              <option value="">All Machines</option>
-              {machines.map((m) => (
-                <option key={m._id} value={m._id}>{m.machineName}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">From Date</label>
-            <DatePicker name="dateFrom" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} placeholder="Start date" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">To Date</label>
-            <DatePicker name="dateTo" value={dateTo} onChange={(e) => setDateTo(e.target.value)} placeholder="End date" />
-          </div>
-          {(dateFrom || dateTo || sheetSearch || activeMachine) && (
-            <button
-              onClick={() => { setSheetSearch(""); setActiveMachine(""); setDateFrom(""); setDateTo(""); }}
-              className="rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-sm font-medium px-4 py-2 transition-colors"
-            >
-              Clear Filters
-            </button>
-          )}
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={handleExportExcel} disabled={exportingExcel || loadingSheet}
+            title="Download all entries matching the Machine / date filters as an Excel file"
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed">
+            <Download className="w-4 h-4" /> {exportingExcel ? "Exporting…" : "Export Excel"}
+          </button>
           <button onClick={() => setShowShiftTimeReport(true)}
-            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0">
             <Clock className="w-4 h-4" /> Shift Time Report
           </button>
           <button onClick={() => setShowEfficiency(true)}
-            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#1a1a1a] hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0">
             <Gauge className="w-4 h-4" /> Efficiency
-          </button>
-          <button onClick={exportExcel} disabled={exporting} title="Download all entries matching the current filters as Excel"
-            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-[#1a1a1a] hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0 disabled:opacity-60">
-            <Download className="w-4 h-4" /> {exporting ? "Exporting…" : "Export Excel"}
           </button>
           {currentPagePermissions.create && (
             <button onClick={openModal} title="Add a new grinding data entry"
-              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-4 py-2 shadow-sm transition-colors shrink-0">
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold px-3.5 py-2 shadow-sm transition-colors shrink-0">
               <Plus className="w-4 h-4" /> Add Entry
             </button>
           )}
@@ -1956,29 +1916,23 @@ const GrindingEntry = () => {
                     sticky="sticky top-0" extraClass="border-b"
                     expandable={i === 0} expanded={showStoppageDetails} onToggleExpand={toggleStoppageDetails}
                   />
-                  {i === 0 && showStoppageDetails && STOPPAGE_FIELDS.slice(1).map((f) => (
+                  {i === 0 && showStoppageDetails && STOPPAGE_FIELDS.slice(1).map((f, j, arr) => (
                     <th key={f.key} className="sticky top-0 z-20 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">
-                      {f.label}
-                    </th>
-                  ))}
-                  {/* Remark — moved inside the collapsed Downtime & Stoppage
-                      group, right after Others (Minutes). Now the true last
-                      column of the group, so the collapse chevron lives here. */}
-                  {i === 0 && showStoppageDetails && (
-                    <th className="sticky top-0 z-20 bg-slate-200 dark:bg-slate-800 px-3 py-2 font-semibold whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700">
                       <span className="inline-flex items-center gap-1">
-                        Remark
-                        <button
-                          type="button"
-                          onClick={() => setShowStoppageDetails(false)}
-                          title="Collapse Downtime & Stoppage Reasons"
-                          className="flex items-center justify-center rounded bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 shrink-0"
-                        >
-                          <ChevronLeft className="w-3.5 h-3.5" />
-                        </button>
+                        {f.label}
+                        {j === arr.length - 1 && (
+                          <button
+                            type="button"
+                            onClick={() => setShowStoppageDetails(false)}
+                            title="Collapse Downtime & Stoppage Reasons"
+                            className="flex items-center justify-center rounded bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 shrink-0"
+                          >
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </span>
                     </th>
-                  )}
+                  ))}
                 </React.Fragment>
               ))}
 
@@ -2023,7 +1977,7 @@ const GrindingEntry = () => {
           </thead>
           <tbody>
             {filteredEntries.length === 0 && (
-              <tr><td colSpan={14 + 1 + 1 + (showStoppageDetails ? STOPPAGE_FIELDS.length : 0) + (showRejectionDetails ? REJECTION_FIELDS.length : 0) + 1 + 5 + 4 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
+              <tr><td colSpan={14 + 1 + 1 + (showStoppageDetails ? STOPPAGE_FIELDS.length - 1 : 0) + (showRejectionDetails ? REJECTION_FIELDS.length : 0) + 1 + 5 + 4 + 4} className="px-4 py-10 text-center text-slate-500 font-medium">
                 {loadingSheet ? "Loading…" : sheetSearch ? "No entries match your search." : "No entries for this machine yet."}
               </td></tr>
             )}
@@ -2108,7 +2062,7 @@ const GrindingEntry = () => {
                 {/* Individual Rejection Reason values — collapsed by default */}
                 {showRejectionDetails && REJECTION_FIELDS.map((f) => (
                   <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
-                    group.map((e) => fmtQty(e[f.key] || 0, false))
+                    group.map((e) => reasonCellItem(e, f, fmtQty(e[f.key] || 0, false)))
                   } />
                 ))}
 
@@ -2119,7 +2073,7 @@ const GrindingEntry = () => {
                     collapsed group. Lunch sits between it and Total
                     Stoppage (both feed into Total Stoppage's sum). */}
                 <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
-                  group.map((e) => fmt(e[STOPPAGE_FIELDS[0].key], "min", false))
+                  group.map((e) => reasonCellItem(e, STOPPAGE_FIELDS[0], fmt(e[STOPPAGE_FIELDS[0].key], "min", false)))
                 } />
                 {/* Lunch — the configured window's duration or 0, see
                     LUNCH_FORMULA. Already folded into Total Stoppage; shown
@@ -2134,30 +2088,9 @@ const GrindingEntry = () => {
                 <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).totalStoppageMin, UNIT_BY_CALC_KEY.totalStoppageMin, false))} />
                 {showStoppageDetails && STOPPAGE_FIELDS.slice(1).map((f) => (
                   <StackedCell key={f.key} className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200`} items={
-                    group.map((e) => fmt(e[f.key], "min", false))
+                    group.map((e) => reasonCellItem(e, f, fmt(e[f.key], "min", false)))
                   } />
                 ))}
-                {/* Remark — moved inside the collapsed Downtime & Stoppage
-                    group, right after Others (Minutes). "eye" opens a
-                    popover with the Others-downtime note. */}
-                {showStoppageDetails && (
-                  <StackedCell className={`${plainBg} px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 text-center`} items={group.map((e) => (
-                    <button
-                      key={e._id}
-                      type="button"
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        const rect = ev.currentTarget.getBoundingClientRect();
-                        toggleRemark(e._id, e.othersRemark, rect);
-                      }}
-                      title="Show remark"
-                      className={`p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${openRemark?.id === e._id ? "text-brand-600" : "text-slate-400"}`}
-                    >
-                      <Eye className="w-4 h-4" />
-                    </button>
-                  ))} />
-                )}
-
                 {/* Available Working Time */}
                 <StackedCell className="px-3 whitespace-nowrap border-r border-b border-slate-300 dark:border-slate-700 bg-violet-50 dark:bg-violet-900/30 text-violet-800 dark:text-violet-300 font-medium" items={group.map((e) => fmt((e.calculated || {}).availableWorkingMin, UNIT_BY_CALC_KEY.availableWorkingMin, false))} />
                 {/* Ideal Production */}
@@ -2281,7 +2214,7 @@ const GrindingEntry = () => {
 
       <FormulaPopover info={openFormula} onClose={() => setOpenFormula(null)} />
       <FormulaPopover
-        info={openRemark ? { rect: openRemark.rect, label: "Remark", formula: openRemark.text?.trim() || "No remark entered." } : null}
+        info={openRemark ? { rect: openRemark.rect, label: openRemark.label || "Remark", formula: openRemark.text?.trim() || "No remark entered." } : null}
         onClose={() => setOpenRemark(null)}
       />
 
@@ -2564,6 +2497,7 @@ const GrindingEntry = () => {
                                   {!rErr(f.key) && capHit && (
                                     <p className="text-[10px] text-red-500 mt-0.5">Limit reached — only {fieldMax} left of the Production − OK Qty difference</p>
                                   )}
+                                  {remarkInput(row, idx, f, rErr)}
                                 </div>
                               );
                             })}
@@ -2587,24 +2521,8 @@ const GrindingEntry = () => {
                                   <input type="number" name={f.key} value={row[f.key]} onChange={(e) => handleRowChange(idx, e)} onWheel={(e) => e.target.blur()} ref={noWheelChange}
                                     min={0} max={1440} step={1} className={cls(rErr(f.key))} />
                                   {rErr(f.key) && <p className="text-[10px] text-red-500 mt-0.5">{rErr(f.key)}</p>}
+                                  {remarkInput(row, idx, f, rErr)}
                                 </div>
-                                {f.key === "othersMin" && (
-                                  <div className="sm:col-span-2">
-                                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-200 mb-0.5">
-                                      Remarks {Number(row.othersMin) > 0 && <span className="text-red-500">*</span>}
-                                    </label>
-                                    <textarea
-                                      name="othersRemark"
-                                      value={row.othersRemark}
-                                      onChange={(e) => handleRowChange(idx, e)}
-                                      maxLength={300}
-                                      rows={2}
-                                      placeholder="Describe the reason for Others downtime"
-                                      className={cls(rErr("othersRemark")) + " resize-none"}
-                                    />
-                                    {rErr("othersRemark") && <p className="text-[10px] text-red-500 mt-0.5">{rErr("othersRemark")}</p>}
-                                  </div>
-                                )}
                               </React.Fragment>
                             ))}
                           </div>
