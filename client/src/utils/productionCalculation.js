@@ -24,6 +24,8 @@
 // stay untouched (still based on this row's own raw Effective M/C Run
 // Time) — see server/services/productionCalculation.service.js's matching
 // 2026-09-05 history note.
+// 2026-11-24: Planned Downtime IS part of Total Stoppage (and so AWT), but is
+// removed from the Availability Ratio only (see plannedProductionMin).
 const STOPPAGE_KEYS = [
   "plannedDowntimeMin",
   "noManpowerMin",
@@ -185,7 +187,7 @@ function computeBatchRowScheduleCalcs(rows, shiftOnTime, shiftOffTime) {
       workingScheduleMin,
       // Standard OEE Planned Production Time — see server
       // productionCalculation.service.js's 2026-09-11 note.
-      plannedProductionMin: workingScheduleMin, // 2026-11-24: denominator = Working Schedule Time (server mirror)
+      plannedProductionMin: Math.max(0, workingScheduleMin - num(row.plannedDowntimeMin)), // 2026-11-24: Availability denominator = WST − Planned Downtime (server mirror)
       lunchMin,
       totalStoppageMin,
       // 2026-11-24: Production Qty × Standard Time (server mirror).

@@ -102,7 +102,7 @@ const CALC_COLUMNS = [
     key: "availabilityRatio",
     label: "Availability Ratio",
     unit: "",
-    formula: "Availability Ratio = Available Working Time ÷ Working Schedule Time, where Working Schedule Time is the bigger of this row's machine ON/OFF time and the Shift ON/OFF time, and Available Working Time = Working Schedule Time − Total Stoppage − Lunch (Lunch only when this row fully covers the lunch window) (NA if Working Schedule Time is 0) — per row",
+    formula: "Availability Ratio = Available Working Time ÷ (Working Schedule Time − Planned Downtime), where Working Schedule Time is the bigger of this row's machine ON/OFF time and the Shift ON/OFF time, and Available Working Time = Working Schedule Time − Total Stoppage − Lunch (Lunch only when this row fully covers the lunch window). Planned Downtime is removed from the Availability Ratio only (NA if the denominator is 0) — per row",
   },
   {
     key: "performanceRatio",
@@ -120,7 +120,7 @@ const CALC_COLUMNS = [
 
 const OEE_FORMULA = "OEE % = Availability Ratio × Performance Ratio × Quality Ratio × 100 (Performance is the real value, not capped) — computed per row, from that row's own data";
 const DAILY_NOTE = " — calculated from ALL entries of this Machine on this Date combined (their totals are summed first, then the ratio is taken).";
-const DAILY_AVAIL_FORMULA = "Daily Availability = total Available Working Time ÷ total Working Schedule Time" + DAILY_NOTE;
+const DAILY_AVAIL_FORMULA = "Daily Availability = total Available Working Time ÷ (total Working Schedule Time − total Planned Downtime)" + DAILY_NOTE;
 const DAILY_PERF_FORMULA = "Daily Performance = total Effective M/C Run Time (Σ Production Qty × Standard Time) ÷ total Available Working Time (real value, not capped)" + DAILY_NOTE;
 const DAILY_QUAL_FORMULA = "Daily Quality = total OK Qty ÷ total Production Qty" + DAILY_NOTE;
 const DAILY_OEE_FORMULA = "Daily OEE % = Daily Availability × Daily Performance × Daily Quality × 100" + DAILY_NOTE;

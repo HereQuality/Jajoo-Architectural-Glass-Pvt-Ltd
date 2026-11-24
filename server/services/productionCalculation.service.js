@@ -167,6 +167,8 @@
 // Downtime & Stoppage Reason fields summed for Total Stoppage — INCLUDES
 // plannedDowntimeMin (see the 2026-09-05 history note above) and excludes
 // overtime (added separately, never subtracted here).
+// 2026-11-24: Planned Downtime IS part of Total Stoppage (and so AWT), but is
+// removed from the Availability Ratio only (see plannedProductionMin).
 const STOPPAGE_KEYS = [
   "plannedDowntimeMin",
   "noManpowerMin",
@@ -393,10 +395,11 @@ function computeRowCalculations(row, shiftOnTime, shiftOffTime, isFirst = true, 
   // Availability Ratio — standard OEE (2026-09-11, see the file header):
   // Available Working Time ÷ Planned Production Time. NA (null) when
   // Planned Production Time is 0 (the whole schedule was planned stops).
-  // 2026-11-24: the denominator is now simply Working Schedule Time (the
-  // bigger of machine time and shift time) — nothing subtracted from it;
-  // Total Stoppage and Lunch come off the numerator (AWT) only.
-  const plannedProductionMin = workingScheduleMin;
+  // 2026-11-24: Availability denominator = Working Schedule Time (the bigger
+  // of machine time and shift time) minus Planned Downtime — Planned
+  // Downtime is removed from the Availability Ratio only; Total Stoppage and
+  // Lunch come off the numerator (AWT).
+  const plannedProductionMin = Math.max(0, workingScheduleMin - num(row.plannedDowntimeMin));
   const availabilityRatio = plannedProductionMin > 0 ? Math.min(1, availableWorkingMin / plannedProductionMin) : null;
 
   // Performance = Effective Run ÷ Available Working Time (= Production Qty ÷
